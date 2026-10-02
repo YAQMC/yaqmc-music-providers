@@ -122,6 +122,10 @@ fn prepare_backend_payload(
     backend_mode: &mut String,
     backend_platform: &mut Option<String>,
 ) {
+    if aggregate && requires_platform_route(operation) {
+        *backend_mode = "isolated".to_owned();
+        *backend_platform = Some(platform.to_owned());
+    }
     let Some(object) = payload.as_object_mut() else {
         return;
     };
@@ -192,6 +196,22 @@ fn prepare_backend_payload(
         }
         _ => {}
     }
+}
+
+fn requires_platform_route(operation: &str) -> bool {
+    matches!(
+        operation,
+        "account.auth.login-methods"
+            | "account.auth.prepare-oauth"
+            | "account.auth.start-qr"
+            | "account.auth.complete-oauth"
+            | "account.auth.heartbeat-qr"
+            | "account.auth.cancel-oauth"
+            | "account.auth.cancel-qr"
+            | "account.auth.refresh-qr"
+            | "account.sign-out"
+            | "account.snapshot"
+    )
 }
 
 fn track_reference(
@@ -573,6 +593,14 @@ fn login_methods(value: &Value, platform: &str) -> String {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    if methods.is_empty() {
+        return json!([{
+            "id": "browser-oauth",
+            "label": "Spotify browser login (PKCE)",
+            "flow": "oauth"
+        }])
+        .to_string();
+    }
     Value::Array(methods).to_string()
 }
 
@@ -778,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn only_spotify_exposes_oauth_login_methods() {
+    fn spotify_exposes_oauth_login_and_other_platforms_use_qr_capability() {
         let value = json!({
             "methods": [
                 {"id": "browser-oauth", "label": "Spotify", "requiresLogin": false},
@@ -789,6 +817,41 @@ mod tests {
         assert_eq!(spotify.as_array().unwrap().len(), 1);
         assert_eq!(spotify[0]["flow"], "oauth");
         assert_eq!(login_methods(&value, "netease"), "[]");
+    }
+
+    #[test]
+    fn spotify_login_method_has_a_local_fallback_when_backend_advertises_none() {
+        let methods: Value =
+            serde_json::from_str(&login_methods(&json!({"methods": []}), "spotify")).unwrap();
+        assert_eq!(methods[0]["id"], "browser-oauth");
+        assert_eq!(methods[0]["flow"], "oauth");
+    }
+
+    #[test]
+    fn aggregate_account_operations_route_to_the_package_platform() {
+        for operation in [
+            "account.auth.login-methods",
+            "account.auth.start-qr",
+            "account.auth.complete-oauth",
+            "account.auth.cancel-qr",
+            "account.auth.refresh-qr",
+            "account.sign-out",
+            "account.snapshot",
+        ] {
+            let mut payload = json!({});
+            let mut mode = "aggregate".to_owned();
+            let mut platform = None;
+            prepare_backend_payload(
+                "netease",
+                operation,
+                &mut payload,
+                true,
+                &mut mode,
+                &mut platform,
+            );
+            assert_eq!(mode, "isolated", "{operation}");
+            assert_eq!(platform.as_deref(), Some("netease"), "{operation}");
+        }
     }
 
     #[test]
