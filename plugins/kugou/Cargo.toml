@@ -1,0 +1,23 @@
+[package]
+name = "yaqmc-provider-kugou"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dlmalloc = { version = "0.2", default-features = false, features = ["global"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+wit-bindgen = { version = "0.46", default-features = false, features = ["macros", "realloc"] }
+yaqmc-provider-guest-core = { path = "../guest-core" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

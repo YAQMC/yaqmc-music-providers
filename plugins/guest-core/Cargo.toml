@@ -1,0 +1,11 @@
+[package]
+name = "yaqmc-provider-guest-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+
+[dependencies]
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+
+[workspace]

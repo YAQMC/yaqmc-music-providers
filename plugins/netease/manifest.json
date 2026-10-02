@@ -1,0 +1,35 @@
+{
+  "manifestVersion": 2,
+  "id": "org.yaqmc.providers.netease",
+  "name": "YAQMC NetEase Provider",
+  "description": "NetEase Cloud Music catalog, lyrics, playback, and account adapter.",
+  "version": "0.1.0",
+  "apiVersion": 3,
+  "authors": ["YAQMC contributors"],
+  "repository": "https://github.com/YAQMC/yaqmc-music-providers",
+  "license": "MIT",
+  "platforms": ["windows", "linux"],
+  "entrypoints": {
+    "component": "component/provider.wasm"
+  },
+  "provider": {
+    "id": "org.yaqmc.providers.netease",
+    "name": "NetEase Cloud Music",
+    "witVersion": "0.1.0",
+    "world": "provider-account",
+    "capabilities": [
+      "provider.catalog",
+      "provider.playback",
+      "provider.lyrics",
+      "provider.account"
+    ]
+  },
+  "permissions": [
+    "provider.catalog",
+    "provider.playback",
+    "provider.lyrics",
+    "provider.account",
+    "plugin.storage",
+    "network:http://127.0.0.1:43821"
+  ]
+}

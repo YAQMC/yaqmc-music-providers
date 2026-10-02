@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo fmt --manifest-path plugins/guest-core/Cargo.toml -- --check
+      - run: cargo test --manifest-path plugins/guest-core/Cargo.toml --locked
+      - run: cargo fmt --manifest-path plugins/spotify/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path plugins/netease/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path plugins/kugou/Cargo.toml -- --check
+      - run: pwsh ./scripts/build.ps1 -Mode isolated -OutputDirectory dist/ci
+      - run: pwsh ./scripts/validate.ps1 -SkipBuild

@@ -1,0 +1,36 @@
+{
+  "manifestVersion": 2,
+  "id": "org.yaqmc.providers.spotify",
+  "name": "YAQMC Spotify Provider",
+  "description": "Spotify catalog and account adapter backed by the user-configured local provider service.",
+  "version": "0.1.0",
+  "apiVersion": 3,
+  "authors": ["YAQMC contributors"],
+  "repository": "https://github.com/YAQMC/yaqmc-music-providers",
+  "license": "MIT",
+  "platforms": ["windows", "linux"],
+  "entrypoints": {
+    "component": "component/provider.wasm"
+  },
+  "provider": {
+    "id": "org.yaqmc.providers.spotify",
+    "name": "Spotify",
+    "witVersion": "0.1.0",
+    "world": "provider-account",
+    "capabilities": [
+      "provider.catalog",
+      "provider.playback",
+      "provider.lyrics",
+      "provider.account"
+    ]
+  },
+  "permissions": [
+    "provider.catalog",
+    "provider.playback",
+    "provider.lyrics",
+    "provider.account",
+    "plugin.storage",
+    "network:http://127.0.0.1:43821",
+    "network:https://accounts.spotify.com"
+  ]
+}

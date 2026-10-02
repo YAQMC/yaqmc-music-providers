@@ -1,0 +1,10 @@
+target/
+dist/
+artifacts/
+*.log
+*.tmp
+.env
+.env.*
+config.local.toml
+credentials.json
+*.yaqmc-plugin
