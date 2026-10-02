@@ -57,7 +57,10 @@ The package's provider ID remains platform-specific for compatibility with
 the current YAQMC registry; choose one package as the aggregate entrypoint and
 do not install its two aggregate siblings. Login state is still keyed by
 `(platform, profileId)` in the backend, so an aggregate search can use all
-platforms that have been configured and authenticated.
+platforms that have been configured and authenticated by their corresponding
+isolated provider flows. The current YAQMC account surface is scoped to one
+provider, so use isolated packages when each platform needs its own login,
+account snapshot, or library controls.
 
 ## Login flows
 

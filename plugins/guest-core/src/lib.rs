@@ -85,7 +85,7 @@ where
     if let Some(platform) = backend_platform {
         backend_request["platform"] = json!(platform);
     }
-    let raw = request(backend_request.to_string())?;
+    let raw = decode_network_response(request(backend_request.to_string())?)?;
     let envelope: Value = serde_json::from_str(&raw)
         .map_err(|_| error("invalid-provider-response", "backend response is not JSON"))?;
     if envelope.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -100,6 +100,18 @@ where
         &result,
         aggregate,
     )
+}
+
+fn decode_network_response(raw: String) -> Result<String, String> {
+    let value: Value = serde_json::from_str(&raw)
+        .map_err(|_| error("network", "YAQMC network response is not valid JSON"))?;
+    let Some(body) = value.get("body").and_then(Value::as_str) else {
+        return Ok(raw);
+    };
+    if body.is_empty() {
+        return Err(error("network", "YAQMC network response body is empty"));
+    }
+    Ok(body.to_owned())
 }
 
 fn prepare_backend_payload(
@@ -833,5 +845,54 @@ mod tests {
         .unwrap();
         let response: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["state"], "cancelled");
+    }
+
+    #[test]
+    fn dispatch_unwraps_the_yaqmc_network_response() {
+        let backend = json!({
+            "id": "request-1",
+            "version": 1,
+            "ok": true,
+            "result": {
+                "items": [{
+                    "source": {
+                        "platform": "netease",
+                        "profileId": "default",
+                        "trackId": "163000001"
+                    },
+                    "title": "Fixture Song",
+                    "artists": ["Fixture Artist"],
+                    "album": "Fixture Album",
+                    "durationMs": 123000,
+                    "artworkUrl": "",
+                    "previewUrl": null,
+                    "playable": true,
+                    "metadata": {}
+                }],
+                "nextCursor": null,
+                "platform": "netease",
+                "warnings": []
+            }
+        });
+        let response = dispatch_with_mode(
+            "org.example.provider",
+            "netease",
+            "provider.catalog",
+            "catalog.search",
+            r#"{"query":"fixture","kind":"song","page":0,"limit":10}"#,
+            "isolated",
+            |_| {
+                Ok(json!({
+                    "ok": true,
+                    "status": 200,
+                    "body": backend.to_string()
+                })
+                .to_string())
+            },
+        )
+        .expect("network response is accepted");
+        let response: Value = serde_json::from_str(&response).expect("mapped search response");
+        assert_eq!(response["items"][0]["title"], "Fixture Song");
+        assert_eq!(response["items"][0]["provider"]["trackId"], "163000001");
     }
 }
