@@ -55,7 +55,7 @@
 
 当前插件 `0.2.2` 需要支持 `provider.comments` 的新版 YAQMC 宿主。网易云评论独立于歌词加载，支持热门/最新分页、头像、日期和楼中楼。回复线程完整读取后按时间倒序分页，完整排序最多读取 500 条；超过上限明确返回 `comments-limit-exceeded`。游标绑定歌曲、排序、父评论、账号配置及页大小，旧游标在升级后需要重新打开评论面板。
 
-登录、音源、音质和版权由各平台实际响应决定；登录成功不代表会员权益或完整歌曲播放已获授权。插件不会绕过付费或版权限制。审计及当前验证范围见 [测试记录](docs/TEST-RESULTS.md)。
+登录、音源、音质和版权由各平台实际响应决定；登录成功不代表会员权益或完整歌曲播放已获授权。插件不会绕过付费或版权限制。
 
 ## Spotify 配置
 
@@ -103,8 +103,6 @@ pwsh ./scripts/validate.ps1
 - 包内只有一个 WebAssembly Component；
 - Component 不导入 WASI；
 - 包内没有 Backend、Node.js 或原生可执行文件。
-
-已完成的自动化与宿主级验证见 [`docs/TEST-RESULTS.md`](docs/TEST-RESULTS.md)。人工验收步骤见 [`docs/MANUAL-TEST.md`](docs/MANUAL-TEST.md)。
 
 ## 安全边界
 

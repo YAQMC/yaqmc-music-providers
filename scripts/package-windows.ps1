@@ -25,7 +25,6 @@ foreach ($name in @('README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
     Copy-Item -LiteralPath (Join-Path $repositoryRoot $name) -Destination $destinationRoot
 }
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'docs') -Destination (Join-Path $destinationRoot 'docs') -Recurse
-Copy-Item -LiteralPath (Join-Path $repositoryRoot 'docs/MANUAL-TEST.md') -Destination (Join-Path $destinationRoot '人工测试说明.md')
 Copy-Item -LiteralPath $PortableExe -Destination (Join-Path $destinationRoot 'YAQMC-windows-x64-portable-provider-fix.exe')
 $files = @(Get-ChildItem -LiteralPath $destinationRoot -File -Recurse -Force)
 $destinationPrefix = $destinationRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
