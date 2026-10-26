@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+mod kugou_catalog;
 mod netease_catalog;
 mod netease_comments;
 
@@ -613,6 +614,22 @@ fn dispatch(
     payload: &Value,
 ) -> Result<String, String> {
     match (capability, operation) {
+        ("provider.catalog", "catalog.home") if platform == "kugou" => kugou_catalog::home(payload),
+        ("provider.catalog", "catalog.discover") if platform == "kugou" => {
+            kugou_catalog::discover(payload)
+        }
+        ("provider.catalog", "catalog.playlist") if platform == "kugou" => {
+            kugou_catalog::playlist(payload)
+        }
+        ("provider.catalog", "catalog.album") if platform == "kugou" => {
+            kugou_catalog::album(payload)
+        }
+        ("provider.catalog", "catalog.artist") if platform == "kugou" => {
+            kugou_catalog::artist(payload)
+        }
+        ("provider.catalog", "catalog.artist-page") if platform == "kugou" => {
+            kugou_catalog::artist_page(payload)
+        }
         ("provider.catalog", "catalog.home") if platform == "netease" => {
             netease_catalog::home(payload)
         }
@@ -677,7 +694,7 @@ fn artwork_request_url(platform: &str, url: &str) -> Option<String> {
     let host = rest.split('/').next()?;
     let allowed = match platform {
         "netease" => host.ends_with(".music.126.net") && !host.contains(['@', ':']),
-        "kugou" => host == "imge.kugou.com",
+        "kugou" => ["imge.kugou.com", "singerimg.kugou.com", "c1.kgimg.com"].contains(&host),
         "spotify" => host == "i.scdn.co",
         _ => false,
     };
@@ -1017,7 +1034,8 @@ impl<'de, const FIELDS: u8> Deserialize<'de> for CompactSearchObject<FIELDS> {
                                 && matches!(key.as_str(), "id" | "name"))
                             || (FIELDS == SEARCH_ALBUM_FIELDS
                                 && matches!(key.as_str(), "id" | "name" | "picUrl"))
-                            || (FIELDS == SEARCH_COVER_FIELDS && key == "union_cover")
+                            || (FIELDS == SEARCH_COVER_FIELDS
+                                && matches!(key.as_str(), "union_cover" | "hash_offset"))
                             || (FIELDS == SEARCH_DURATION_FIELDS && key == "128timelength")
                             || (FIELDS == SEARCH_IMAGE_FIELDS && key == "url")
                             || (FIELDS == SEARCH_PRIVILEGE_FIELDS && key == "toast") =>
@@ -1086,6 +1104,15 @@ fn search(platform: &str, payload: &Value) -> Result<String, String> {
             != "song"
     {
         return netease_catalog::search(payload);
+    }
+    if platform == "kugou"
+        && payload
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("song")
+            != "song"
+    {
+        return kugou_catalog::search(payload);
     }
     if payload
         .get("kind")
@@ -1451,9 +1478,18 @@ fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
     let artwork = item
         .get("trans_param")
         .and_then(|value| value.get("union_cover"))
-        .or_else(|| item.get("album_img"))
-        .or_else(|| item.get("imgUrl"))
         .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            item.get("album_img")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            item.get("imgUrl")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        })
         .map(normalize_kugou_artwork)
         .map(Value::String)
         .unwrap_or(json!(""));
@@ -1510,6 +1546,12 @@ fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
     );
     // Catalog metadata is not proof that this account can play the full track.
     song.as_object_mut()?.remove("playbackCapability");
+    if let Some(clip) = item
+        .pointer("/trans_param/hash_offset")
+        .and_then(|offset| kugou_preview_hash(&json!({"status":2,"hash_offset":offset})))
+    {
+        song["provider"]["mediaId"] = json!(clip);
+    }
     match kugou_notice_code(item) {
         Some("entitlement-insufficient") => {
             song["availability"] =
@@ -1550,7 +1592,7 @@ fn normalize_netease_artwork(value: &str) -> String {
 
 fn normalize_kugou_artwork(value: &str) -> String {
     let value = value.replace("{size}", "400");
-    for host in ["imge.kugou.com", "singerimg.kugou.com"] {
+    for host in ["imge.kugou.com", "singerimg.kugou.com", "c1.kgimg.com"] {
         let prefix = format!("http://{host}/");
         if let Some(path) = value.strip_prefix(&prefix) {
             return format!("https://{host}/{path}");
@@ -2462,7 +2504,7 @@ fn qr_snapshot(
 fn capabilities(platform: &str, authenticated: bool) -> Value {
     json!({
         "qrLogin": platform != "spotify",
-        "favoriteRead": authenticated && platform != "kugou",
+        "favoriteRead": authenticated,
         "favoriteWrite": false,
         "playlistRead": authenticated,
         "playlistWrite": false,
@@ -3158,7 +3200,7 @@ fn favorite_songs(platform: &str, payload: &Value) -> Result<String, String> {
     match platform {
         "spotify" => spotify_favorite_songs(profile, payload),
         "netease" => netease_favorite_songs(profile, payload),
-        "kugou" => Err(unsupported("account.favorite-songs")),
+        "kugou" => kugou_catalog::favorite_songs(profile, payload),
         _ => Err(unsupported("account.favorite-songs")),
     }
 }
@@ -3879,6 +3921,14 @@ fn playback(platform: &str, payload: &Value) -> Result<String, String> {
             let mut selected = None;
             let mut rights_fallback = false;
             let mut failure_code = "full-playback-unavailable";
+            let mut preview_hash = payload
+                .pointer("/song/provider/mediaId")
+                .and_then(Value::as_str)
+                .filter(|hash| {
+                    hash.len() == 32 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .map(ToOwned::to_owned);
+            let mut is_preview = false;
             for candidate in kugou_quality_candidates(&quality) {
                 let response = kugou_song_url(profile, &id, candidate, payload)?;
                 if let Some(url) = kugou_media_url(&response) {
@@ -3886,10 +3936,23 @@ fn playback(platform: &str, payload: &Value) -> Result<String, String> {
                     break;
                 }
                 failure_code = kugou_playback_failure_code(&response);
+                preview_hash = kugou_preview_hash(&response).or(preview_hash);
                 if json_u64(&response, &["status"]) != Some(2) {
                     break;
                 }
                 rights_fallback = true;
+            }
+            if selected.is_none() && failure_code == "entitlement-insufficient" {
+                if let Some(hash) = preview_hash {
+                    let response =
+                        kugou_song_url_with_preview(profile, &hash, "standard", &json!({}), true)?;
+                    if kugou_is_preview_resource(&response, &hash) {
+                        if let Some(url) = kugou_media_url(&response) {
+                            selected = Some((response, url));
+                            is_preview = true;
+                        }
+                    }
+                }
             }
             let (response, url) = selected.ok_or_else(|| {
                 error(
@@ -3915,7 +3978,7 @@ fn playback(platform: &str, payload: &Value) -> Result<String, String> {
                 media_metadata(&url)?
             };
             let resolved = media_quality(&response, &mime);
-            (url, length, mime, false, resolved, rights_fallback)
+            (url, length, mime, is_preview, resolved, rights_fallback)
         }
         _ => return Err(unsupported("playback.resolve")),
     };
@@ -4179,6 +4242,39 @@ fn kugou_song_url(
     quality: &str,
     payload: &Value,
 ) -> Result<Value, String> {
+    kugou_song_url_with_preview(profile, id, quality, payload, false)
+}
+
+fn kugou_preview_hash(value: &Value) -> Option<String> {
+    if json_u64(value, &["status"]) != Some(2) {
+        return None;
+    }
+    let hash = json_string(value, &["hash_offset", "clip_hash"])?;
+    let start = json_u64(value, &["hash_offset", "start_ms"])?;
+    let end = json_u64(value, &["hash_offset", "end_ms"])?;
+    (hash.len() == 32
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && end > start
+        && end - start <= 90_000)
+        .then_some(hash)
+}
+
+fn kugou_is_preview_resource(value: &Value, hash: &str) -> bool {
+    value
+        .get("hash")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case(hash))
+        && json_u64(value, &["timeLength"]).is_some_and(|seconds| (1..=90).contains(&seconds))
+        && json_u64(value, &["fileSize"]).is_some_and(|size| size > 0)
+}
+
+fn kugou_song_url_with_preview(
+    profile: &str,
+    id: &str,
+    quality: &str,
+    payload: &Value,
+    preview: bool,
+) -> Result<Value, String> {
     let hash = id.to_ascii_lowercase();
     let response = kugou_request(
         "GET",
@@ -4197,6 +4293,7 @@ fn kugou_song_url(
                 kugou_playback_reference(payload, "numericId"),
             ),
             ("behavior", "play".to_owned()),
+            ("IsFreePart", if preview { "1" } else { "0" }.to_owned()),
             ("pid", "2".to_owned()),
             ("cmd", "26".to_owned()),
             ("pidversion", "3001".to_owned()),
@@ -4375,17 +4472,37 @@ fn kugou_request_inner(
     router: Option<&str>,
     add_key: bool,
 ) -> Result<Value, String> {
-    let mid_key = state_key("kugou", DEFAULT_PROFILE, "device-mid");
-    let mid = match storage_get(&mid_key)? {
-        Some(value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
-            value
-        }
-        _ => {
-            let value = random_device_id()?;
-            storage_set(&mid_key, &value)?;
-            value
-        }
-    };
+    let response = kugou_request_inner_as::<Value>(
+        method,
+        base,
+        path,
+        params,
+        credential_handle,
+        body,
+        signature_kind,
+        router,
+        add_key,
+    )?;
+    require_kugou_success(&response, path)?;
+    Ok(response)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Protocol signing keeps credential and origin bindings explicit"
+)]
+fn kugou_request_inner_as<Body: DeserializeOwned>(
+    method: &str,
+    base: &str,
+    path: &str,
+    params: &[(&str, String)],
+    credential_handle: Option<&str>,
+    body: Option<&str>,
+    signature_kind: KugouSignature,
+    router: Option<&str>,
+    add_key: bool,
+) -> Result<Body, String> {
+    let mid = kugou_device_mid()?;
     let client_time = (now_ms() / 1000).to_string();
     let mut all = params
         .iter()
@@ -4422,19 +4539,13 @@ fn kugou_request_inner(
             .to_ascii_lowercase(),
         );
     }
-    match signature_kind {
-        KugouSignature::Android => {
-            let signature = md5_sorted_signature(&all, "OIlwieks28dk2k092lksi2UIkp", false, "")
-                .to_ascii_lowercase();
-            add_param(&mut all, "signature", &signature);
-        }
-        KugouSignature::Web => {
-            let signature =
-                md5_sorted_signature(&all, "NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt", false, "")
-                    .to_ascii_lowercase();
-            add_param(&mut all, "signature", &signature);
-        }
-    }
+    let salt = match signature_kind {
+        KugouSignature::Android => "OIlwieks28dk2k092lksi2UIkp",
+        KugouSignature::Web => "NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt",
+    };
+    let signature =
+        md5_sorted_signature(&all, salt, false, body.unwrap_or("")).to_ascii_lowercase();
+    add_param(&mut all, "signature", &signature);
     let url = query_url(
         base,
         path,
@@ -4458,8 +4569,11 @@ fn kugou_request_inner(
     ];
     if let Some(router) = router {
         headers.push(("x-router", router.to_owned()));
+        if router == "openapi.kugou.com" {
+            headers.push(("kg-tid", "255".to_owned()));
+        }
     }
-    let response = request_with_meta_headers(
+    let response = request_with_meta_headers_as::<Body>(
         method,
         &url,
         body,
@@ -4468,8 +4582,22 @@ fn kugou_request_inner(
         None,
         &headers,
     )?;
-    require_kugou_success(&response.body, path)?;
     Ok(response.body)
+}
+
+fn kugou_device_mid() -> Result<String, String> {
+    let mid_key = state_key("kugou", DEFAULT_PROFILE, "device-mid");
+    let mid = match storage_get(&mid_key)? {
+        Some(value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
+            value
+        }
+        _ => {
+            let value = random_device_id()?;
+            storage_set(&mid_key, &value)?;
+            value
+        }
+    };
+    Ok(mid)
 }
 
 fn add_param(params: &mut Vec<(String, String)>, key: &str, value: &str) {
@@ -4830,7 +4958,7 @@ mod tests {
 
     #[test]
     fn unsupported_operations_do_not_report_false_success() {
-        for platform in ["spotify", "kugou"] {
+        for platform in ["spotify"] {
             for kind in ["artist", "album", "playlist"] {
                 let result = search(platform, &json!({"kind": kind, "query": "sample"}));
                 let failure: Value = serde_json::from_str(&result.unwrap_err()).unwrap();
@@ -5632,6 +5760,26 @@ mod tests {
 
     #[test]
     fn kugou_rejections_preserve_the_reason_without_leaking_upstream_text() {
+        let clip = "687E9FD5A3DF6CA07AC8F1A4C495FA0A";
+        assert_eq!(
+            kugou_preview_hash(
+                &json!({"status":2,"hash_offset":{"clip_hash":clip,"start_ms":0,"end_ms":60000}})
+            )
+            .as_deref(),
+            Some(clip)
+        );
+        assert!(kugou_preview_hash(
+            &json!({"status":1,"hash_offset":{"clip_hash":clip,"start_ms":0,"end_ms":60000}})
+        )
+        .is_none());
+        assert!(kugou_is_preview_resource(
+            &json!({"hash":clip,"timeLength":60,"fileSize":960600}),
+            clip
+        ));
+        assert!(!kugou_is_preview_resource(
+            &json!({"hash":"full-track","timeLength":217,"fileSize":3484743}),
+            clip
+        ));
         for (response, expected) in [
             (
                 json!({"status":0,"err_code":10002,"msg":"参数错误"}),
