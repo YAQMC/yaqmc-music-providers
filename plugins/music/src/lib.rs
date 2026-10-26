@@ -3,6 +3,7 @@
 extern crate alloc;
 
 mod kugou_catalog;
+mod kugou_comments;
 mod netease_catalog;
 mod netease_comments;
 
@@ -655,6 +656,9 @@ fn dispatch(
         ("provider.lyrics", "lyrics.get") => lyrics(platform, payload),
         ("provider.comments", "comments.list") if platform == "netease" => {
             netease_comments::comments_page(payload)
+        }
+        ("provider.comments", "comments.list") if platform == "kugou" => {
+            kugou_comments::comments_page(payload)
         }
         ("provider.playback", "playback.resolve")
         | ("provider.playback", "playback.resolve-client-fallback") => playback(platform, payload),

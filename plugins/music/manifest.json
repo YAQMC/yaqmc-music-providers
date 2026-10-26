@@ -3,7 +3,7 @@
   "id": "org.yaqmc.providers.music",
   "name": "YAQMC Music Platforms",
   "description": "Spotify, NetEase Cloud Music, and KuGou provider in one self-contained plugin.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "apiVersion": 3,
   "authors": ["YAQMC contributors"],
   "repository": "https://github.com/YAQMC/yaqmc-music-providers",
@@ -33,7 +33,7 @@
       "platform": "kugou",
       "witVersion": "0.1.0",
       "world": "provider-account",
-      "capabilities": ["provider.catalog", "provider.playback", "provider.lyrics", "provider.account"]
+      "capabilities": ["provider.catalog", "provider.playback", "provider.lyrics", "provider.comments", "provider.account"]
     }
   ],
   "federations": [
