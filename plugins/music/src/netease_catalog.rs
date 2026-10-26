@@ -319,11 +319,18 @@ pub(super) fn lyrics(profile: &str, id: &str) -> Result<String, String> {
         .and_then(|v| v.lyric)
         .map(|v| parse_lrc(&v))
         .unwrap_or_default();
-    let lines = parse_lrc(&original).into_iter().enumerate().map(|(i,(start,text))| {
-        json!({"id": format!("line-{i}"), "startMs": start, "endMs": null, "text": text, "words": [],
-            "translation": translated.iter().find(|v| v.0==start).map(|v| v.1.as_str()),
-            "romanization": romanized.iter().find(|v| v.0==start).map(|v| v.1.as_str())})
-    }).collect::<Vec<_>>();
+    let mut lines = kugou_lyrics::lrc_lines(&original, 0);
+    for line in &mut lines {
+        let start = line["startMs"].as_u64().unwrap_or(0);
+        line["translation"] = json!(translated
+            .iter()
+            .find(|v| v.0 == start)
+            .map(|v| v.1.as_str()));
+        line["romanization"] = json!(romanized
+            .iter()
+            .find(|v| v.0 == start)
+            .map(|v| v.1.as_str()));
+    }
     Ok(
         json!({"songId": id, "syncMode": if lines.is_empty(){"unsynchronized"}else{"line"},
         "metadata": {"sourceLabel": "网易云音乐", "offsetMs": 0}, "vocalists": [], "lines": lines})

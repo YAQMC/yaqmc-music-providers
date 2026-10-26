@@ -4,6 +4,7 @@ extern crate alloc;
 
 mod kugou_catalog;
 mod kugou_comments;
+mod kugou_lyrics;
 mod netease_catalog;
 mod netease_comments;
 
@@ -818,8 +819,8 @@ fn status_value(platform: &str, profile: &str, quality: &str) -> Value {
         "message": "",
         "preferredQuality": quality,
         "capabilities": {
-            "search": true, "album": platform == "netease", "artist": platform == "netease", "playlist": platform == "netease",
-            "lyrics": platform != "spotify", "wordTimedLyrics": false,
+            "search": true, "album": platform != "spotify", "artist": platform != "spotify", "playlist": platform != "spotify",
+            "lyrics": platform != "spotify", "wordTimedLyrics": platform == "kugou",
             "streaming": true, "qualitySelection": platform != "spotify",
         }
     })
@@ -3672,108 +3673,14 @@ fn song_detail(platform: &str, payload: &Value) -> Result<String, String> {
 
 fn lyrics(platform: &str, payload: &Value) -> Result<String, String> {
     let id = track_id(payload);
-    let profile = platform_id(payload);
     if id.is_empty() {
         return Err(error("invalid-request", "track ID is empty", false));
     }
-    if platform == "netease" {
-        return netease_catalog::lyrics(profile, &id);
+    match platform {
+        "netease" => netease_catalog::lyrics(platform_id(payload), &id),
+        "kugou" => kugou_lyrics::get(payload),
+        _ => Err(unsupported("lyrics.get")),
     }
-    let (plain, synced) = match platform {
-        "spotify" => return Err(unsupported("lyrics.get")),
-        "netease" => {
-            let response = netease_request(
-                profile,
-                "/api/song/lyric",
-                json!({"id": id, "tv": -1, "lv": -1, "rv": -1, "kv": -1, "_nmclfl": 1}),
-            )?;
-            require_netease_success(&response)?;
-            let plain = json_string(&response, &["lrc", "lyric"]);
-            let synced = plain.as_deref().map(parse_lrc).unwrap_or_default();
-            (plain, synced)
-        }
-        "kugou" => {
-            let detail = parse_object(&song_detail(platform, payload)?)?;
-            let title = json_string(&detail, &["title"]).unwrap_or_default();
-            let duration_ms = json_u64(&detail, &["durationMs"]).unwrap_or(0);
-            let search = kugou_request(
-                "GET",
-                KUGOU_LYRICS,
-                "/search",
-                &[
-                    ("ver", "1".to_owned()),
-                    ("client", "pc".to_owned()),
-                    ("hash", id.clone()),
-                    (
-                        "album_audio_id",
-                        json_u64(&detail, &["provider", "numericId"])
-                            .map(|id| id.to_string())
-                            .unwrap_or_else(|| "0".to_owned()),
-                    ),
-                    ("duration", duration_ms.to_string()),
-                    ("keyword", title.clone()),
-                    ("lrctxt", "1".to_owned()),
-                    ("man", "no".to_owned()),
-                ],
-                None,
-                KugouSignature::Android,
-                None,
-                false,
-            )?;
-            let Some((lyric_id, access_key)) = kugou_lyric_candidate(&search, &title, duration_ms)
-            else {
-                return Ok("null".to_owned());
-            };
-            let response = kugou_request(
-                "GET",
-                KUGOU_LYRICS,
-                "/download",
-                &[
-                    ("ver", "1".to_owned()),
-                    ("client", "android".to_owned()),
-                    ("id", lyric_id),
-                    ("accesskey", access_key),
-                    ("fmt", "lrc".to_owned()),
-                    ("charset", "utf8".to_owned()),
-                ],
-                None,
-                KugouSignature::Android,
-                None,
-                false,
-            )?;
-            let encoded = json_string(&response, &["content"]).unwrap_or_default();
-            let plain = STANDARD
-                .decode(encoded.as_bytes())
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .or_else(|| (!encoded.is_empty()).then_some(encoded));
-            let synced = plain.as_deref().map(parse_lrc).unwrap_or_default();
-            (plain, synced)
-        }
-        _ => return Err(unsupported("lyrics.get")),
-    };
-    let lines = synced
-        .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            json!({
-                "id": format!("line-{index}"),
-                "startMs": line.0,
-                "endMs": Value::Null,
-                "text": line.1,
-                "words": []
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "songId": id,
-        "syncMode": if lines.is_empty() { "unsynchronized" } else { "line" },
-        "metadata": {"sourceLabel": platform, "offsetMs": 0},
-        "vocalists": [],
-        "lines": lines,
-        "plain": plain
-    })
-    .to_string())
 }
 
 fn parse_lrc(value: &str) -> Vec<(u64, String)> {
@@ -4958,6 +4865,25 @@ mod tests {
         assert_eq!(entitlement["membership"], "unknown");
         assert_eq!(entitlement["permittedQualities"], json!([]));
         assert!(entitlement["observedMaximumQuality"].is_null());
+    }
+
+    #[test]
+    fn kugou_status_advertises_implemented_catalog_and_word_lyrics() {
+        let status = status_value("kugou", "work", "standard");
+        for field in [
+            "search",
+            "album",
+            "artist",
+            "playlist",
+            "lyrics",
+            "wordTimedLyrics",
+        ] {
+            assert_eq!(status["capabilities"][field], true, "{field}");
+        }
+        assert_eq!(
+            status_value("spotify", "work", "standard")["capabilities"]["album"],
+            false
+        );
     }
 
     #[test]
