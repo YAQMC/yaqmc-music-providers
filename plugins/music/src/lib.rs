@@ -1003,6 +1003,15 @@ impl<'de, const FIELDS: u8> Deserialize<'de> for CompactSearchObject<FIELDS> {
                                     | "extra"
                                     | "Duration"
                                     | "timeLength"
+                                    | "timelen"
+                                    | "timelength"
+                                    | "album_id"
+                                    | "AlbumID"
+                                    | "albumid"
+                                    | "album_audio_id"
+                                    | "MixSongID"
+                                    | "Singers"
+                                    | "authors"
                             ))
                             || (FIELDS == SEARCH_ARTIST_FIELDS
                                 && matches!(key.as_str(), "id" | "name"))
@@ -1411,6 +1420,10 @@ fn map_netease_song(item: &Value, profile: &str) -> Option<Value> {
 }
 
 fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
+    let item = item
+        .get("fileinfo")
+        .filter(|value| value.is_object())
+        .unwrap_or(item);
     let id = first_string(item, &[&["hash"], &["Hash"], &["filehash"], &["FileHash"]])?;
     let title = first_string(
         item,
@@ -1446,6 +1459,8 @@ fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
         .unwrap_or(json!(""));
     let duration = json_u64(item, &["extra", "128timelength"])
         .filter(|value| *value > 0)
+        .or_else(|| json_u64(item, &["timelen"]).filter(|value| *value > 0))
+        .or_else(|| json_u64(item, &["timelength"]).filter(|value| *value > 0))
         .or_else(|| {
             json_u64(item, &["duration"])
                 .filter(|value| *value > 0)
@@ -1462,18 +1477,65 @@ fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
                 .map(|value| value.saturating_mul(1000))
         })
         .unwrap_or(0);
-    Some(song_value(
+    let artists = item
+        .get("Singers")
+        .or_else(|| item.get("authors"))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| {
+                    let name = first_string(value, &[&["name"], &["author_name"]])?;
+                    let id = json_id_string(
+                        value.get("id").or_else(|| value.get("author_id")),
+                        format!("{id}-artist"),
+                    );
+                    Some(json!({"id":id,"name":name}))
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec![json!({"id": format!("{id}-artist"), "name": artist})]);
+    let mut song = song_value(
         "kugou",
         profile,
         &id,
         &title,
-        vec![json!({"id": format!("{id}-artist"), "name": artist})],
+        artists,
         &album,
         artwork,
         duration,
         Value::Null,
         true,
-    ))
+    );
+    // Catalog metadata is not proof that this account can play the full track.
+    song.as_object_mut()?.remove("playbackCapability");
+    match kugou_notice_code(item) {
+        Some("entitlement-insufficient") => {
+            song["availability"] =
+                json!({"status":"entitlement-required","requiredTier":"music-vip"})
+        }
+        Some("copyright-restricted") => {
+            song["availability"] = json!({"status":"unavailable","reason":"copyright-restricted"})
+        }
+        _ => {}
+    }
+    if let Some(album_id) = ["AlbumID", "album_id", "albumid"]
+        .iter()
+        .find_map(|key| item.get(*key).and_then(|value| json_u64(value, &[])))
+        .filter(|id| *id > 0)
+    {
+        song["album"]["id"] = json!(album_id.to_string());
+        song["provider"]["albumId"] = json!(album_id.to_string());
+    }
+    if let Some(mixsong_id) = ["MixSongID", "album_audio_id"]
+        .iter()
+        .find_map(|key| item.get(*key).and_then(|value| json_u64(value, &[])))
+        .filter(|id| *id > 0)
+    {
+        song["provider"]["numericId"] = json!(mixsong_id);
+    }
+    Some(song)
 }
 
 fn normalize_netease_artwork(value: &str) -> String {
@@ -1975,6 +2037,8 @@ fn complete_browser_login(platform: &str, payload: &Value) -> Result<String, Str
     }
     if platform == "netease" {
         netease_catalog::account(profile, &response)
+    } else if platform == "kugou" {
+        kugou_account(profile, &response)
     } else {
         authenticated_snapshot(platform, profile, display_name)
     }
@@ -2150,6 +2214,7 @@ fn finish_qr_poll(
         QrCheck::Authenticated {
             secret,
             display_name,
+            avatar_url,
         } => {
             if platform == "netease" {
                 replace_credential(
@@ -2175,7 +2240,10 @@ fn finish_qr_poll(
                 )?;
             }
             storage_delete(&key)?;
-            authenticated_snapshot(platform, profile, display_name)
+            let mut snapshot =
+                authenticated_snapshot_value(platform, profile, display_name, now_ms());
+            snapshot["profile"]["avatarUrl"] = json!(avatar_url);
+            Ok(snapshot.to_string())
         }
         QrCheck::Expired => {
             storage_delete(&key)?;
@@ -2190,6 +2258,7 @@ enum QrCheck {
     Authenticated {
         secret: String,
         display_name: Option<String>,
+        avatar_url: Option<String>,
     },
     Expired,
 }
@@ -2223,6 +2292,7 @@ fn netease_check_qr(key: &str, _profile: &str) -> Result<QrCheck, String> {
             Ok(QrCheck::Authenticated {
                 secret,
                 display_name: None,
+                avatar_url: None,
             })
         }
         800 => Ok(QrCheck::Expired),
@@ -2263,11 +2333,29 @@ fn parse_kugou_qr_check(response: &Value) -> Result<QrCheck, String> {
                 error("malformed-response", "KuGou returned no login token", false)
             })?;
             let userid = first_string(response, &[&["data", "userid"], &["data", "user_id"]])
-                .or_else(|| json_u64(response, &["data", "userid"]).map(|v| v.to_string()))
+                .or_else(|| {
+                    json_u64(response, &["data", "userid"])
+                        .or_else(|| json_u64(response, &["data", "user_id"]))
+                        .map(|v| v.to_string())
+                })
                 .ok_or_else(|| error("malformed-response", "KuGou returned no user ID", false))?;
+            if token.is_empty()
+                || token.len() > 8192
+                || token
+                    .bytes()
+                    .any(|byte| !(0x21..=0x7e).contains(&byte) || matches!(byte, b';' | b','))
+                || !userid.parse::<u64>().is_ok_and(|value| value > 0)
+            {
+                return Err(error(
+                    "malformed-response",
+                    "KuGou returned invalid login credentials",
+                    false,
+                ));
+            }
             Ok(QrCheck::Authenticated {
                 secret: format!("token={token}; userid={userid}"),
                 display_name: json_string(response, &["data", "nickname"]),
+                avatar_url: kugou_avatar(response),
             })
         }
         Some(0) => Ok(QrCheck::Expired),
@@ -2406,7 +2494,16 @@ fn authenticated_snapshot(
     profile: &str,
     display_name: Option<String>,
 ) -> Result<String, String> {
-    Ok(json!({
+    Ok(authenticated_snapshot_value(platform, profile, display_name, now_ms()).to_string())
+}
+
+fn authenticated_snapshot_value(
+    platform: &str,
+    profile: &str,
+    display_name: Option<String>,
+    revision: u64,
+) -> Value {
+    json!({
         "state": "authenticated",
         "profile": {
             "avatarUrl": Value::Null,
@@ -2416,10 +2513,9 @@ fn authenticated_snapshot(
         "entitlement": unknown_entitlement(),
         "providerId": provider_id(platform),
         "profileId": profile,
-        "revision": now_ms(),
+        "revision": revision,
         "capabilities": capabilities(platform, true)
     })
-    .to_string())
 }
 
 fn unknown_entitlement() -> Value {
@@ -2520,7 +2616,33 @@ fn kugou_account_snapshot(profile: &str) -> Result<String, String> {
         Some("usercenter.kugou.com"),
         false,
     )?;
-    authenticated_snapshot("kugou", profile, account_display_name("kugou", &response)?)
+    kugou_account(profile, &response)
+}
+
+fn kugou_avatar(response: &Value) -> Option<String> {
+    [
+        &["data", "pic"][..],
+        &["data", "user_pic"],
+        &["data", "avatar"],
+        &["data", "base_info", "pic"],
+        &["data", "base_info", "user_pic"],
+        &["data", "base_info", "avatar"],
+    ]
+    .iter()
+    .filter_map(|path| json_string(response, path))
+    .map(|value| normalize_kugou_artwork(&value))
+    .find(|value| artwork_request_url("kugou", value).is_some())
+}
+
+fn kugou_account(profile: &str, response: &Value) -> Result<String, String> {
+    let mut snapshot = authenticated_snapshot_value(
+        "kugou",
+        profile,
+        account_display_name("kugou", response)?,
+        now_ms(),
+    );
+    snapshot["profile"]["avatarUrl"] = json!(kugou_avatar(response));
+    Ok(snapshot.to_string())
 }
 
 fn account_display_name(platform: &str, response: &Value) -> Result<Option<String>, String> {
@@ -2575,14 +2697,19 @@ fn account_display_name(platform: &str, response: &Value) -> Result<Option<Strin
             {
                 return Err(malformed());
             }
-            Ok(first_string(
+            // The signed user-info endpoint does not necessarily echo userid.
+            // Its successful profile fields belong to the credential-bound request.
+            first_string(
                 response,
                 &[
                     &["data", "nickname"],
                     &["data", "user_name"],
                     &["data", "base_info", "nickname"],
                 ],
-            ))
+            )
+            .filter(|name| !name.trim().is_empty())
+            .map(Some)
+            .ok_or_else(malformed)
         }
         _ => Err(unsupported("account.snapshot")),
     }
@@ -2856,12 +2983,7 @@ fn netease_playlist_summary(item: &Value, profile: &str, user_id: &str) -> Optio
 }
 
 fn kugou_playlist_summary(item: &Value, profile: &str) -> Option<Value> {
-    let id = json_id_string(
-        item.get("global_collection_id")
-            .or_else(|| item.get("specialid"))
-            .or_else(|| item.get("listid")),
-        String::new(),
-    );
+    let id = json_id_string(item.get("listid"), String::new());
     if !id.parse::<u64>().is_ok_and(|id| id > 0) {
         return None;
     }
@@ -2891,6 +3013,7 @@ fn kugou_playlist_summary(item: &Value, profile: &str) -> Option<Value> {
         ownership,
         json_u64(item, &["song_count"])
             .or_else(|| json_u64(item, &["songcount"]))
+            .or_else(|| json_u64(item, &["count"]))
             .unwrap_or(0),
     ))
 }
@@ -3105,7 +3228,7 @@ fn netease_playlists(profile: &str, payload: &Value) -> Result<String, String> {
     Ok(account_page(items, next, total))
 }
 
-fn kugou_list_items(response: &Value) -> Result<&Vec<Value>, String> {
+fn kugou_list_items(response: &Value) -> Result<&[Value], String> {
     if json_u64(response, &["status"]) != Some(1) {
         return Err(error(
             "malformed-response",
@@ -3120,8 +3243,26 @@ fn kugou_list_items(response: &Value) -> Result<&Vec<Value>, String> {
                 .or_else(|| data.get("info").and_then(Value::as_array))
                 .or_else(|| data.get("lists").and_then(Value::as_array))
                 .or_else(|| data.get("list").and_then(Value::as_array))
+                .map(Vec::as_slice)
+                .or_else(|| {
+                    (data.get("count").is_some_and(|value| {
+                        value.as_u64() == Some(0) || value.as_str() == Some("0")
+                    }) && data.get("info").is_some_and(Value::is_null))
+                    .then_some(&[][..])
+                })
         })
         .ok_or_else(|| error("malformed-response", "KuGou collection is missing", true))
+}
+
+fn kugou_collection_total(response: &Value) -> Option<u64> {
+    [
+        &["data", "total"][..],
+        &["total"],
+        &["data", "count"],
+        &["data", "list_count"],
+    ]
+    .iter()
+    .find_map(|path| json_u64(response, path))
 }
 
 fn kugou_page_number(offset: u64, page_limit: u64) -> Result<u64, String> {
@@ -3141,7 +3282,7 @@ fn kugou_next_cursor(
     page_limit: u64,
     consumed: usize,
 ) -> Result<Option<String>, String> {
-    let total = json_u64(response, &["data", "total"]).or_else(|| json_u64(response, &["total"]));
+    let total = kugou_collection_total(response);
     let more = total
         .map(|total| offset.saturating_add(page_limit) < total)
         .unwrap_or(consumed as u64 >= page_limit);
@@ -3175,7 +3316,7 @@ fn kugou_playlists(profile: &str, payload: &Value) -> Result<String, String> {
         .iter()
         .filter_map(|item| kugou_playlist_summary(item, profile))
         .collect::<Vec<_>>();
-    let total = json_u64(&response, &["data", "total"]).or_else(|| json_u64(&response, &["total"]));
+    let total = kugou_collection_total(&response);
     let next = kugou_next_cursor(&response, offset, page_limit, raw_items.len())?;
     Ok(account_page(items, next, total))
 }
@@ -3383,7 +3524,7 @@ fn kugou_playlist_tracks(
         .iter()
         .filter_map(|item| map_kugou_song(item, profile))
         .collect::<Vec<_>>();
-    let total = json_u64(&response, &["data", "total"]).or_else(|| json_u64(&response, &["total"]));
+    let total = kugou_collection_total(&response);
     let next = kugou_next_cursor(&response, offset, page_limit, raw_tracks.len())?;
     Ok(json!({
         "summary": playlist,
@@ -3512,10 +3653,17 @@ fn lyrics(platform: &str, payload: &Value) -> Result<String, String> {
             let search = kugou_request(
                 "GET",
                 KUGOU_LYRICS,
-                "/v1/search",
+                "/search",
                 &[
+                    ("ver", "1".to_owned()),
+                    ("client", "pc".to_owned()),
                     ("hash", id.clone()),
-                    ("album_audio_id", "0".to_owned()),
+                    (
+                        "album_audio_id",
+                        json_u64(&detail, &["provider", "numericId"])
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "0".to_owned()),
+                    ),
                     ("duration", duration_ms.to_string()),
                     ("keyword", title.clone()),
                     ("lrctxt", "1".to_owned()),
@@ -3730,12 +3878,14 @@ fn playback(platform: &str, payload: &Value) -> Result<String, String> {
         "kugou" => {
             let mut selected = None;
             let mut rights_fallback = false;
+            let mut failure_code = "full-playback-unavailable";
             for candidate in kugou_quality_candidates(&quality) {
-                let response = kugou_song_url(profile, &id, candidate)?;
+                let response = kugou_song_url(profile, &id, candidate, payload)?;
                 if let Some(url) = kugou_media_url(&response) {
                     selected = Some((response, url));
                     break;
                 }
+                failure_code = kugou_playback_failure_code(&response);
                 if json_u64(&response, &["status"]) != Some(2) {
                     break;
                 }
@@ -3743,11 +3893,7 @@ fn playback(platform: &str, payload: &Value) -> Result<String, String> {
             }
             let (response, url) = selected.ok_or_else(|| {
                 error(
-                    if rights_fallback {
-                        "entitlement-insufficient"
-                    } else {
-                        "full-playback-unavailable"
-                    },
+                    failure_code,
                     "KuGou returned no permitted media source",
                     false,
                 )
@@ -4027,21 +4173,29 @@ fn normalize_kugou_media_url(url: &str) -> Option<String> {
     }
 }
 
-fn kugou_song_url(profile: &str, id: &str, quality: &str) -> Result<Value, String> {
+fn kugou_song_url(
+    profile: &str,
+    id: &str,
+    quality: &str,
+    payload: &Value,
+) -> Result<Value, String> {
     let hash = id.to_ascii_lowercase();
     let response = kugou_request(
         "GET",
         KUGOU_MEDIA,
         "/v5/url",
         &[
-            ("album_id", "0".to_owned()),
+            ("album_id", kugou_playback_reference(payload, "albumId")),
             ("area_code", "1".to_owned()),
             ("hash", hash.clone()),
             ("ssa_flag", "is_fromtrack".to_owned()),
             ("version", "11430".to_owned()),
             ("page_id", "151369488".to_owned()),
             ("quality", kugou_quality(quality).to_owned()),
-            ("album_audio_id", "0".to_owned()),
+            (
+                "album_audio_id",
+                kugou_playback_reference(payload, "numericId"),
+            ),
             ("behavior", "play".to_owned()),
             ("pid", "2".to_owned()),
             ("cmd", "26".to_owned()),
@@ -4060,6 +4214,92 @@ fn kugou_song_url(profile: &str, id: &str, quality: &str) -> Result<Value, Strin
     )?;
     let data = response.get("data").cloned().unwrap_or(response);
     Ok(data)
+}
+
+fn kugou_playback_reference(payload: &Value, field: &str) -> String {
+    json_u64(payload, &["song", "provider", field])
+        .filter(|id| *id > 0)
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "0".to_owned())
+}
+
+fn kugou_notice_code(value: &Value) -> Option<&'static str> {
+    let notices = ["msg", "message", "error", "error_msg"]
+        .iter()
+        .filter_map(|field| value.get(*field).and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let contains = |words: &[&str]| {
+        notices
+            .iter()
+            .any(|notice| words.iter().any(|word| notice.contains(word)))
+    };
+    if contains(&[
+        "暂无版权",
+        "无版权",
+        "版权限制",
+        "版权保护",
+        "地区限制",
+        "地域限制",
+    ]) {
+        Some("copyright-restricted")
+    } else if contains(&["登录已过期", "登录失效", "token已过期", "token失效"]) {
+        Some("authentication-expired")
+    } else if contains(&["请先登录", "需要登录", "未登录"]) {
+        Some("authentication-required")
+    } else if contains(&["需要付费", "需要会员", "会员专享", "购买后", "付费歌曲"])
+    {
+        Some("entitlement-insufficient")
+    } else if contains(&["参数错误", "参数不合法"]) {
+        Some("invalid-request")
+    } else if contains(&["请求过于频繁", "访问过于频繁"]) {
+        Some("rate-limited")
+    } else {
+        None
+    }
+}
+
+fn kugou_playback_failure_code(value: &Value) -> &'static str {
+    if let Some(code) = kugou_notice_code(value) {
+        return code;
+    }
+    if json_u64(value, &["status"]) == Some(2) {
+        return "entitlement-insufficient";
+    }
+    let urls = value.get("url");
+    if urls.is_some_and(|urls| {
+        urls.as_str().is_some_and(|url| !url.is_empty())
+            || urls.as_array().is_some_and(|urls| {
+                urls.iter()
+                    .any(|url| url.as_str().is_some_and(|url| !url.is_empty()))
+            })
+    }) {
+        return "malformed-response";
+    }
+    "full-playback-unavailable"
+}
+
+fn require_kugou_success(value: &Value, path: &str) -> Result<(), String> {
+    let lyric_success =
+        matches!(path, "/search" | "/download") && json_u64(value, &["status"]) == Some(200);
+    if ["error_code", "err_code", "errcode"].iter().any(|field| {
+        value
+            .get(*field)
+            .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+            .is_some_and(|code| code != 0 && !(lyric_success && code == 200))
+    }) || json_u64(value, &["status"]) == Some(0)
+    {
+        let code = kugou_notice_code(value).unwrap_or(if path == "/v3/get_my_info" {
+            "authentication-expired"
+        } else {
+            "provider-unavailable"
+        });
+        return Err(error(
+            code,
+            "KuGou rejected the request",
+            matches!(code, "provider-unavailable" | "rate-limited"),
+        ));
+    }
+    Ok(())
 }
 
 fn kugou_quality(quality: &str) -> &str {
@@ -4228,27 +4468,7 @@ fn kugou_request_inner(
         None,
         &headers,
     )?;
-    if response
-        .body
-        .get("error_code")
-        .and_then(Value::as_i64)
-        .is_some_and(|code| code != 0)
-        || response
-            .body
-            .get("status")
-            .and_then(Value::as_i64)
-            .is_some_and(|status| status == 0)
-    {
-        return Err(error(
-            if path == "/v3/get_my_info" && json_u64(&response.body, &["status"]) == Some(0) {
-                "authentication-expired"
-            } else {
-                "provider-unavailable"
-            },
-            "KuGou rejected the request",
-            path != "/v3/get_my_info",
-        ));
-    }
+    require_kugou_success(&response.body, path)?;
     Ok(response.body)
 }
 
@@ -5304,6 +5524,173 @@ mod tests {
     }
 
     #[test]
+    fn kugou_catalog_keeps_native_ids_without_claiming_full_playback() {
+        let source = json!({"FileHash":"TRACK", "SongName":"Song", "Duration":269,
+            "AlbumID":"966846", "MixSongID":"32100650", "Singers":[{"id":3520,"name":"Artist"}]});
+        let compact: CompactSearchSong = serde_json::from_value(source.clone()).unwrap();
+        for source in [&source, &compact.0] {
+            let mapped = map_kugou_song(source, "work").unwrap();
+            assert_eq!(mapped["provider"]["trackId"], "TRACK");
+            assert_eq!(mapped["provider"]["numericId"], 32100650);
+            assert_eq!(mapped["provider"]["albumId"], "966846");
+            assert_eq!(mapped["album"]["id"], "966846");
+            assert_eq!(mapped["artists"][0]["id"], "3520");
+            assert!(mapped.get("playbackCapability").is_none());
+            assert_eq!(
+                kugou_playback_reference(&json!({"song":mapped}), "numericId"),
+                "32100650"
+            );
+        }
+        assert_eq!(kugou_playback_reference(&json!({}), "numericId"), "0");
+        let paid = map_kugou_song(&json!({"hash":"TRACK", "error":"需要付费"}), "work").unwrap();
+        assert_eq!(paid["availability"]["status"], "entitlement-required");
+        let restricted =
+            map_kugou_song(&json!({"hash":"TRACK", "error":"暂无版权"}), "work").unwrap();
+        assert_eq!(restricted["availability"]["reason"], "copyright-restricted");
+    }
+
+    #[test]
+    fn kugou_cloud_tracks_preserve_millisecond_duration() {
+        let song = map_kugou_song(
+            &json!({"fileinfo":{"hash":"TRACK", "filename":"Artist - Song", "timelen":231000}}),
+            "work",
+        )
+        .unwrap();
+        assert_eq!(song["durationMs"], 231000);
+        assert_eq!(song["provider"]["profileId"], "work");
+    }
+
+    #[test]
+    fn kugou_avatars_use_only_the_granted_https_image_origin() {
+        assert_eq!(
+            kugou_avatar(
+                &json!({"data":{"pic":"http://imge.kugou.com/kugouicon/{size}/avatar.jpg"}})
+            )
+            .as_deref(),
+            Some("https://imge.kugou.com/kugouicon/400/avatar.jpg")
+        );
+        assert_eq!(
+            kugou_avatar(
+                &json!({"data":{"pic":"", "base_info":{"pic":"https://imge.kugou.com/avatar.jpg"}}})
+            )
+            .as_deref(),
+            Some("https://imge.kugou.com/avatar.jpg")
+        );
+        for url in [
+            "https://imge.kugou.com.evil.invalid/a.jpg",
+            "https://user@imge.kugou.com/a.jpg",
+            "https://imge.kugou.com:444/a.jpg",
+            "data:image/png;base64,A",
+        ] {
+            assert!(kugou_avatar(&json!({"data":{"pic":url}})).is_none());
+        }
+        assert_eq!(account_display_name(
+            "kugou",
+            &json!({"status":1,"data":{"nickname":"Listener","pic":"https://imge.kugou.com/avatar.jpg"}})
+        ).unwrap().as_deref(), Some("Listener"));
+        assert!(
+            account_display_name("kugou", &json!({"status":1,"data":{"unexpected":1}})).is_err()
+        );
+        assert_eq!(
+            account_display_name(
+                "kugou",
+                &json!({"status":1,"data":{"base_info":{"userid":42,"nickname":"Listener"}}})
+            )
+            .unwrap()
+            .as_deref(),
+            Some("Listener")
+        );
+    }
+
+    #[test]
+    fn kugou_qr_credentials_are_validated_before_storage() {
+        for data in [
+            json!({"token":"", "userid":42}),
+            json!({"token":"x;userid=99", "userid":42}),
+            json!({"token":"x\n", "userid":42}),
+            json!({"token":"synthetic", "userid":0}),
+            json!({"token":"synthetic", "userid":"invalid"}),
+        ] {
+            let mut response = json!({"data":data});
+            response["data"]["status"] = json!(4);
+            assert!(parse_kugou_qr_check(&response).is_err());
+        }
+        let response = json!({"data":{"status":4,"token":"synthetic","user_id":42,"pic":"http://imge.kugou.com/avatar.jpg"}});
+        match parse_kugou_qr_check(&response).unwrap() {
+            QrCheck::Authenticated {
+                secret, avatar_url, ..
+            } => {
+                assert_eq!(secret, "token=synthetic; userid=42");
+                assert_eq!(
+                    avatar_url.as_deref(),
+                    Some("https://imge.kugou.com/avatar.jpg")
+                );
+            }
+            _ => panic!("expected an authenticated QR response"),
+        }
+    }
+
+    #[test]
+    fn kugou_rejections_preserve_the_reason_without_leaking_upstream_text() {
+        for (response, expected) in [
+            (
+                json!({"status":0,"err_code":10002,"msg":"参数错误"}),
+                "invalid-request",
+            ),
+            (json!({"error_code":-1}), "provider-unavailable"),
+            (json!({"errcode":"-1"}), "provider-unavailable"),
+            (
+                json!({"status":0,"error":"暂无版权 token=synthetic"}),
+                "copyright-restricted",
+            ),
+            (
+                json!({"status":0,"msg":"需要付费"}),
+                "entitlement-insufficient",
+            ),
+            (
+                json!({"status":0,"msg":"请先登录"}),
+                "authentication-required",
+            ),
+            (
+                json!({"status":0,"msg":"登录已过期"}),
+                "authentication-expired",
+            ),
+            (json!({"status":0,"msg":"请求过于频繁"}), "rate-limited"),
+        ] {
+            let reason = require_kugou_success(&response, "/v5/url").unwrap_err();
+            let failure: Value = serde_json::from_str(&reason).unwrap();
+            assert_eq!(failure["code"], expected);
+            assert!(!reason.contains("synthetic"));
+        }
+        assert!(require_kugou_success(&json!({"status":1,"err_code":0}), "/v5/url").is_ok());
+        for path in ["/search", "/download"] {
+            assert!(require_kugou_success(
+                &json!({"status":200,"errcode":200,"errmsg":"OK"}),
+                path
+            )
+            .is_ok());
+            assert!(require_kugou_success(&json!({"status":0,"errcode":200}), path).is_err());
+        }
+        assert!(require_kugou_success(&json!({"status":1,"errcode":200}), "/v5/url").is_err());
+        assert_eq!(
+            kugou_playback_failure_code(&json!({"status":2})),
+            "entitlement-insufficient"
+        );
+        assert_eq!(
+            kugou_playback_failure_code(&json!({"status":2,"message":"版权限制"})),
+            "copyright-restricted"
+        );
+        assert_eq!(
+            kugou_playback_failure_code(&json!({"url":"https://evil.invalid/song.mp3"})),
+            "malformed-response"
+        );
+        assert_eq!(
+            kugou_playback_failure_code(&json!({"url":[]})),
+            "full-playback-unavailable"
+        );
+    }
+
+    #[test]
     fn account_playlist_mappers_preserve_platform_scope_and_numeric_ids() {
         let spotify = spotify_playlist_summary(
             &json!({
@@ -5342,6 +5729,7 @@ mod tests {
         let kugou = kugou_playlist_summary(
             &json!({
                 "global_collection_id": "99",
+                "listid": "11",
                 "specialid": "88",
                 "name": "Collected set",
                 "type": 1,
@@ -5353,7 +5741,8 @@ mod tests {
             "work",
         )
         .expect("KuGou playlist");
-        assert_eq!(kugou["id"], "99");
+        assert_eq!(kugou["id"], "11");
+        assert_eq!(kugou["reference"]["tid"], "11");
         assert_eq!(kugou["ownership"], "collected");
         assert_eq!(kugou["owner"]["id"], "123");
         assert_eq!(kugou["trackCount"], 2);
@@ -5430,6 +5819,23 @@ mod tests {
 
     #[test]
     fn account_collection_shapes_and_playlist_scope_are_strict() {
+        let empty = json!({"status":1,"data":{"count":0,"info":null}});
+        assert!(kugou_list_items(&empty).unwrap().is_empty());
+        assert_eq!(kugou_collection_total(&empty), Some(0));
+        assert_eq!(kugou_next_cursor(&empty, 0, 20, 0).unwrap(), None);
+        assert!(kugou_list_items(&json!({"status":1,"data":{"count":1,"info":null}})).is_err());
+        assert!(kugou_list_items(&json!({"status":1,"data":{"count":-1,"info":null}})).is_err());
+        assert_eq!(
+            kugou_collection_total(&json!({"data":{"list_count":2}})),
+            Some(2)
+        );
+        let playlist = kugou_playlist_summary(
+            &json!({"listid":7,"global_collection_id":"99","name":"Set","count":9}),
+            "default",
+        )
+        .unwrap();
+        assert_eq!(playlist["trackCount"], 9);
+        assert_eq!(playlist["id"], "7");
         assert!(kugou_list_items(&json!({"status": 1, "data": {}})).is_err());
         assert!(kugou_list_items(&json!({"status": 0, "data": []})).is_err());
         assert!(required_array(&json!({}), "/items").is_err());

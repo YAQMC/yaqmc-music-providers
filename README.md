@@ -2,7 +2,7 @@
 
 为 [YAQMC](https://github.com/YAQMC/YAQMC) 接入 **Spotify、网易云音乐和酷狗音乐**的音源插件，可与内置 QQ 音乐一起使用。
 
-三个平台打包为一个 `.yaqmc-plugin` 文件，在 YAQMC 的 WebAssembly 沙箱内运行，无需单独启动后端或安装 Node.js。当前插件版本为 **0.2.2**，支持 Windows 和 Linux。
+三个平台打包为一个 `.yaqmc-plugin` 文件，在 YAQMC 的 WebAssembly 沙箱内运行，无需单独启动后端或安装 Node.js。当前插件版本为 **0.2.3**，支持 Windows 和 Linux。
 
 ## 功能
 
@@ -26,7 +26,7 @@
 3. 在 YAQMC 的插件页面安装该文件，查看并授予平台网络访问等所需权限。
 4. 在插件设置中选择工作模式，然后到账号页面登录需要使用的平台。Spotify 需先填写自己的 Client ID。
 
-也可以按照下方步骤从源码构建。插件安装包名为 `org.yaqmc.providers.music-0.2.2.yaqmc-plugin`。
+也可以按照下方步骤从源码构建。插件安装包名为 `org.yaqmc.providers.music-0.2.3.yaqmc-plugin`。
 
 ## 工作模式
 
@@ -82,7 +82,7 @@ pwsh ./scripts/build.ps1
 生成的插件包位于：
 
 ```text
-dist/org.yaqmc.providers.music-0.2.2.yaqmc-plugin
+dist/org.yaqmc.providers.music-0.2.3.yaqmc-plugin
 ```
 
 构建后验证包内容：
