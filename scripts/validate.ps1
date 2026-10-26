@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [string]$PackageDirectory = "dist"
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,12 +17,6 @@ function Invoke-Cargo {
     }
 }
 
-function Invoke-FormatCheck {
-    param([string]$ManifestPath)
-
-    Invoke-Cargo @("fmt", "--manifest-path", $ManifestPath, "--", "--check")
-}
-
 function Test-ProviderPackage {
     param([Parameter(Mandatory)] [string]$Path)
 
@@ -29,10 +24,9 @@ function Test-ProviderPackage {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::OpenRead($Path)
     try {
-        $entries = @($archive.Entries | Where-Object { $_.Length -gt 0 })
+        $entries = @($archive.Entries)
         $names = @($entries | ForEach-Object { $_.FullName })
-        $lowerNames = @($names | ForEach-Object { $_.ToLowerInvariant() })
-        if (($lowerNames | Select-Object -Unique).Count -ne $lowerNames.Count) {
+        if (($names | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique).Count -ne $names.Count) {
             throw "package contains duplicate paths: $Path"
         }
         if (-not ($names -contains "manifest.json")) {
@@ -48,45 +42,54 @@ function Test-ProviderPackage {
         if ($manifest.manifestVersion -ne 2 -or $manifest.apiVersion -ne 3) {
             throw "package is not an API v3 component: $Path"
         }
+        if (@($manifest.providers).Count -ne 3) {
+            throw "package must declare exactly three platform providers: $Path"
+        }
+        if ($manifest.permissions -contains "network:http://127.0.0.1:43821") {
+            throw "package still grants the old loopback backend origin: $Path"
+        }
         $componentPath = [string]$manifest.entrypoints.component
+        if ($entries.Count -ne 2 -or $names -notcontains 'component/provider.wasm' -or $componentPath -ne 'component/provider.wasm') {
+            throw "package must contain only its manifest and component: $Path"
+        }
+        if ($manifest.id -ne 'org.yaqmc.providers.music' -or $manifest.version -ne $expectedManifest.version) {
+            throw "package identity does not match the current source manifest: $Path"
+        }
+        if (($manifest.providers | ConvertTo-Json -Depth 20 -Compress) -ne ($expectedManifest.providers | ConvertTo-Json -Depth 20 -Compress) -or
+            ($manifest.permissions | ConvertTo-Json -Depth 20 -Compress) -ne ($expectedManifest.permissions | ConvertTo-Json -Depth 20 -Compress)) {
+            throw "package capabilities or permissions do not match the source: $Path"
+        }
         if ([string]::IsNullOrWhiteSpace($componentPath) -or -not ($names -contains $componentPath)) {
             throw "package component entrypoint is missing: $Path"
-        }
-        if (-not ($manifest.permissions -contains "network:http://127.0.0.1:43821")) {
-            throw "package does not declare the loopback backend origin: $Path"
         }
         $wasmEntries = @($entries | Where-Object { $_.FullName.ToLowerInvariant().EndsWith(".wasm") })
         if ($wasmEntries.Count -ne 1 -or $wasmEntries[0].FullName -ne $componentPath) {
             throw "package must contain exactly one component Wasm file: $Path"
         }
-        $stream = $wasmEntries[0].Open()
-        $binaryReader = [IO.BinaryReader]::new($stream)
+        $componentStream = $wasmEntries[0].Open()
         try {
-            $magic = $binaryReader.ReadBytes(8)
+            $memory = [IO.MemoryStream]::new()
+            $componentStream.CopyTo($memory)
+            $componentBytes = $memory.ToArray()
         } finally {
-            $binaryReader.Dispose()
-            $stream.Dispose()
+            $componentStream.Dispose()
         }
-        $expected = [byte[]](0, 97, 115, 109, 13, 0, 1, 0)
-        $magicMatches = $magic.Length -eq $expected.Length
-        if ($magicMatches) {
-            for ($index = 0; $index -lt $expected.Length; $index++) {
-                if ($magic[$index] -ne $expected[$index]) {
-                    $magicMatches = $false
-                    break
-                }
-            }
+        if ($componentBytes.Length -lt 8 -or
+            $componentBytes[0] -ne 0 -or $componentBytes[1] -ne 0x61 -or
+            $componentBytes[2] -ne 0x73 -or $componentBytes[3] -ne 0x6d -or
+            $componentBytes[4] -ne 0x0d -or $componentBytes[5] -ne 0 -or
+            $componentBytes[6] -ne 1 -or $componentBytes[7] -ne 0) {
+            throw "package entrypoint is not a WebAssembly Component: $Path"
         }
-        if (-not $magicMatches) {
-            throw "component entrypoint is not a Wasm component: $Path"
+        if ([Text.Encoding]::ASCII.GetString($componentBytes).Contains("wasi:")) {
+            throw "package component unexpectedly imports WASI: $Path"
         }
-        $forbiddenExtensions = @(".exe", ".dll", ".so", ".dylib", ".node")
         foreach ($name in $names) {
-            if ($name.StartsWith("/") -or $name.Contains("..\\") -or $name.Contains("../")) {
+            if ($name.StartsWith("/") -or $name.Contains("..\") -or $name.Contains("../")) {
                 throw "package contains an unsafe path: $Path"
             }
-            if ($forbiddenExtensions | Where-Object { $name.ToLowerInvariant().EndsWith($_) }) {
-                throw "package contains a native binary: $Path"
+            if ($name -match "(?i)(\.exe|\.dll|\.so|\.dylib|\.node)$" -or $name -match "(?i)(node_modules|backend|runtime)") {
+                throw "package contains a legacy runtime artifact: $Path"
             }
         }
         Write-Output ("inspected {0}" -f $Path)
@@ -96,26 +99,25 @@ function Test-ProviderPackage {
 }
 
 if (-not $SkipBuild) {
-    Invoke-Cargo @("fmt", "--all", "--", "--check")
-    Invoke-FormatCheck "plugins/guest-core/Cargo.toml"
-    Invoke-FormatCheck "plugins/spotify/Cargo.toml"
-    Invoke-FormatCheck "plugins/netease/Cargo.toml"
-    Invoke-FormatCheck "plugins/kugou/Cargo.toml"
-    Invoke-Cargo @("check", "--workspace", "--locked")
-    Invoke-Cargo @("test", "--workspace", "--locked")
-    Invoke-Cargo @("test", "--manifest-path", "plugins/guest-core/Cargo.toml", "--locked")
-    Invoke-Cargo @("clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings")
-    & (Join-Path $PSScriptRoot "build.ps1") -Mode isolated -OutputDirectory "dist/isolated"
+    Invoke-Cargo @("fmt", "--manifest-path", "plugins/music/Cargo.toml", "--", "--check")
+    Invoke-Cargo @(
+        "check",
+        "--locked",
+        "--target",
+        "wasm32-unknown-unknown",
+        "--manifest-path",
+        "plugins/music/Cargo.toml"
+    )
+    Invoke-Cargo @("test", "--locked", "--manifest-path", "plugins/music/Cargo.toml")
+    & (Join-Path $PSScriptRoot "build.ps1") -OutputDirectory $PackageDirectory
     if ($LASTEXITCODE -ne 0) {
-        throw "isolated package build failed"
-    }
-    & (Join-Path $PSScriptRoot "build.ps1") -Mode aggregate -OutputDirectory "dist/aggregate"
-    if ($LASTEXITCODE -ne 0) {
-        throw "aggregate package build failed"
+        throw "plugin package build failed"
     }
 }
 
-Get-ChildItem -LiteralPath (Join-Path $repositoryRoot "dist") -Recurse -Filter "*.yaqmc-plugin" |
-    ForEach-Object { Test-ProviderPackage -Path $_.FullName }
-
+$expectedManifest = Get-Content -LiteralPath (Join-Path $repositoryRoot "plugins/music/manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+$packageRoot = if ([IO.Path]::IsPathRooted($PackageDirectory)) { [IO.Path]::GetFullPath($PackageDirectory) } else { Join-Path $repositoryRoot $PackageDirectory }
+$packagePath = Join-Path $packageRoot ("{0}-{1}.yaqmc-plugin" -f $expectedManifest.id, $expectedManifest.version)
+if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) { throw "current plugin package is missing: $packagePath" }
+Test-ProviderPackage -Path $packagePath
 Write-Output "validation complete"

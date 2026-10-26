@@ -145,21 +145,41 @@ impl PlatformAdapter for KugouClient {
         if method != "qr" {
             return Err(PlatformError::Unsupported);
         }
-        let response = self
+        let key_response = self
             .api
             .json::<Value>(
                 Method::GET,
-                "/login/qr/create",
+                "/login/qr/key",
                 &[("timestamp", now_ms().to_string())],
                 &[],
                 None,
             )
             .await?;
-        let payload = response
-            .pointer("/data/qr")
-            .or_else(|| response.pointer("/data/qrimg"))
-            .or_else(|| response.pointer("/data/url"))
+        let key = key_response
+            .pointer("/data/qrcode")
             .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+            .ok_or(PlatformError::InvalidResponse)?;
+        let response = self
+            .api
+            .json::<Value>(
+                Method::GET,
+                "/login/qr/create",
+                &[
+                    ("key", key.to_owned()),
+                    ("qrimg", "true".to_owned()),
+                    ("timestamp", now_ms().to_string()),
+                ],
+                &[],
+                None,
+            )
+            .await?;
+        let payload = response
+            .pointer("/data/base64")
+            .or_else(|| response.pointer("/data/qr"))
+            .or_else(|| response.pointer("/data/qrimg"))
+            .and_then(Value::as_str)
+            .filter(|image| image.starts_with("data:image/png;base64,"))
             .ok_or(PlatformError::InvalidResponse)?;
         Ok(AuthPreparation {
             attempt_id: Uuid::new_v4().to_string(),
@@ -169,11 +189,7 @@ impl PlatformAdapter for KugouClient {
                 .map(ToOwned::to_owned),
             qr_payload: Some(payload.to_owned()),
             expires_at_ms: now_ms().saturating_add(5 * 60 * 1000),
-            verifier: response
-                .pointer("/data/token")
-                .or_else(|| response.pointer("/data/key"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
+            verifier: Some(key.to_owned()),
             state: None,
         })
     }
@@ -194,7 +210,7 @@ impl PlatformAdapter for KugouClient {
                 Method::GET,
                 "/login/qr/check",
                 &[
-                    ("token", token.to_owned()),
+                    ("key", token.to_owned()),
                     ("timestamp", now_ms().to_string()),
                 ],
                 &[],
@@ -203,17 +219,32 @@ impl PlatformAdapter for KugouClient {
             .await?;
         let status = response
             .pointer("/data/status")
-            .and_then(Value::as_str)
-            .unwrap_or("pending");
+            .and_then(Value::as_u64)
+            .ok_or(PlatformError::InvalidResponse)?;
         match status {
-            "success" | "logged_in" | "ok" => {
-                let secret = response
-                    .pointer("/data/cookie")
-                    .or_else(|| response.pointer("/data/token"))
+            4 => {
+                let token = response
+                    .pointer("/data/token")
                     .and_then(Value::as_str)
-                    .map(ToOwned::to_owned);
+                    .filter(|value| !value.is_empty())
+                    .ok_or(PlatformError::InvalidResponse)?;
+                let userid = response
+                    .pointer("/data/userid")
+                    .and_then(|value| {
+                        value
+                            .as_u64()
+                            .map(|id| id.to_string())
+                            .or_else(|| value.as_str().map(ToOwned::to_owned))
+                    })
+                    .filter(|value| !value.is_empty())
+                    .ok_or(PlatformError::InvalidResponse)?;
+                if token.contains([';', '\r', '\n'])
+                    || !userid.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return Err(PlatformError::InvalidResponse);
+                }
                 Ok(AuthCompletion {
-                    secret,
+                    secret: Some(format!("token={token}; userid={userid}")),
                     display_name: response
                         .pointer("/data/nickname")
                         .and_then(Value::as_str)
@@ -221,8 +252,9 @@ impl PlatformAdapter for KugouClient {
                     ..AuthCompletion::default()
                 })
             }
-            "expired" => Err(PlatformError::Upstream("QR login expired".to_owned())),
-            _ => Err(PlatformError::AuthenticationPending),
+            0 => Err(PlatformError::Upstream("QR login expired".to_owned())),
+            1 | 2 => Err(PlatformError::AuthenticationPending),
+            _ => Err(PlatformError::InvalidResponse),
         }
     }
 
@@ -444,6 +476,70 @@ fn mask_identity(value: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn qr_login_uses_upstream_key_image_and_numeric_status() {
+        let server = httpmock::MockServer::start();
+        let key = server.mock(|when, then| {
+            when.path("/login/qr/key");
+            then.json_body(json!({"data": {"qrcode": "test-key"}}));
+        });
+        let image = server.mock(|when, then| {
+            when.path("/login/qr/create")
+                .query_param("key", "test-key")
+                .query_param("qrimg", "true");
+            then.json_body(json!({"data": {"base64": "data:image/png;base64,YQ=="}}));
+        });
+        let client = KugouClient::new(KugouConfig {
+            base_url: server.base_url(),
+        })
+        .unwrap();
+        let session = ProfileSession::guest(Platform::Kugou, "test");
+        let preparation = client.prepare_auth(&session, "qr").await.unwrap();
+        key.assert();
+        image.assert();
+        assert_eq!(preparation.verifier.as_deref(), Some("test-key"));
+        assert_eq!(
+            preparation.qr_payload.as_deref(),
+            Some("data:image/png;base64,YQ==")
+        );
+        for status in [0, 1, 2, 4, 99] {
+            let mut check = server.mock(|when, then| {
+                when.path("/login/qr/check").query_param("key", "test-key");
+                then.json_body(
+                    json!({"data": {"status": status, "token": "test-token", "userid": 123}}),
+                );
+            });
+            let completion = client
+                .complete_auth(&session, &preparation, &json!({}))
+                .await;
+            match status {
+                0 => assert!(matches!(completion, Err(PlatformError::Upstream(_)))),
+                1 | 2 => assert!(matches!(
+                    completion,
+                    Err(PlatformError::AuthenticationPending)
+                )),
+                4 => assert_eq!(
+                    completion.unwrap().secret.as_deref(),
+                    Some("token=test-token; userid=123")
+                ),
+                _ => assert!(matches!(completion, Err(PlatformError::InvalidResponse))),
+            }
+            check.assert();
+            check.delete();
+        }
+        let missing_token = server.mock(|when, then| {
+            when.path("/login/qr/check");
+            then.json_body(json!({"data": {"status": 4, "userid": 123}}));
+        });
+        assert!(matches!(
+            client
+                .complete_auth(&session, &preparation, &json!({}))
+                .await,
+            Err(PlatformError::InvalidResponse)
+        ));
+        missing_token.assert();
+    }
 
     #[test]
     fn maps_common_kugou_search_shape() {

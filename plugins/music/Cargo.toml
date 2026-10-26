@@ -1,0 +1,33 @@
+[package]
+name = "yaqmc-provider-music"
+version = "0.2.2"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aes = { version = "0.8", default-features = false }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+cbc = { version = "0.1", default-features = false, features = ["alloc", "block-padding"] }
+dlmalloc = { version = "0.2", default-features = false, features = ["global"] }
+ecb = { version = "0.1", default-features = false, features = ["alloc", "block-padding"] }
+md-5 = { version = "0.10", default-features = false }
+num-bigint = { version = "0.4", default-features = false }
+qrcodegen = { version = "1.8", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
+wit-bindgen = { version = "0.46", default-features = false, features = ["macros", "realloc"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[workspace]

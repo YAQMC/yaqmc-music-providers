@@ -1,257 +1,139 @@
 # YAQMC Music Providers
 
-YAQMC 的独立音乐平台 Provider Component 仓库。它把 Spotify、网易云音乐和酷狗音乐接入 YAQMC，同时保留 YAQMC 内置的 QQ 音乐 Provider。
+一个自包含的 YAQMC Provider 插件，同时接入 Spotify、网易云音乐和酷狗音乐，并与 YAQMC 内置 QQ 音乐 Provider 共存。
 
-本仓库包含两部分：
+当前版本为 `0.2.2` 人工验收候选版。人工扫码、Spotify OAuth 和播放验收通过前，不创建 Tag 或 Release。
 
-- `Wasm Provider Component`：安装到 YAQMC 的插件包。
-- `native backend`：独立运行的本地服务，负责上游 API、登录状态和媒体地址代理。
+## 关键特性
 
-插件不会启动 Backend，也不会代理或读取 QQ 音乐 Cookie。使用前必须先启动 Backend。
+- 只安装一个 `.yaqmc-plugin` 文件。
+- 不需要 Backend、Node.js、本地 API 服务或常驻进程。
+- 插件通过 YAQMC 受控网络接口直接访问平台 HTTPS API。
+- Token 和 Cookie 由 YAQMC 凭据存储保管；插件持有不可读句柄。
+- Spotify Client ID 由用户在插件设置中提供，使用 OAuth 2.0 Authorization Code + PKCE，不保存 Client Secret。
+- 网易云和酷狗可在独立小浏览器中通过 QQ、微信登录，也保留平台二维码入口。
+- 歌曲封面按来源平台与 Profile 获取；只显示宿主校验后的图片，不放开网页任意联网。
 
-## 当前状态
+## 平台能力
 
-这是一个可构建、可安装的实验性集成。功能是否可用取决于平台账号、地区、上游 API 服务和播放权限。
-
-| 平台 | 独立模式 | 登录方式 | 真实上游播放 |
+| 平台 | 登录 | 歌曲搜索/歌曲详情/歌词 | 播放边界 |
 | --- | --- | --- | --- |
-| Spotify | 已实现 | 用户提供 Client ID，浏览器 OAuth 2.0 + PKCE | 需要可用播放会话和 Premium；Web API 搜索不保证完整音频 |
-| 网易云音乐 | 已实现 | 兼容 API 提供二维码登录 | 取决于兼容 API 和账号状态 |
-| 酷狗音乐 | 已实现 | 兼容 API 提供二维码登录 | 取决于兼容 API 和账号状态 |
-| QQ 音乐 | YAQMC 内置 | 由 YAQMC 管理 | 不经过本仓库 Backend |
+| Spotify | 用户 Client ID + PKCE | Web API 搜索/详情；不提供歌词 | 只使用 Spotify 返回的试听地址，不伪装成完整音频 |
+| 网易云音乐 | QQ/微信网页登录、平台二维码 | 直连网易云接口 | 受账号、地区、版权和上游接口限制 |
+| 酷狗音乐 | QQ/微信网页登录、平台二维码 | 直连酷狗接口 | 受账号、地区、版权和上游接口限制 |
+| QQ 音乐 | YAQMC 内置流程 | YAQMC 内置 Provider | 不经过本插件 |
 
 ## 两种模式
 
-模式在构建插件包时确定，不是 YAQMC 运行时开关。
+模式在插件设置中切换，不需要重新打包。
 
-### 独立模式
+### `isolated`
 
-每个平台对应一个 YAQMC Provider。可以同时安装并启用三个包：
+同时注册三个独立 Provider：
 
-- `org.yaqmc.providers.spotify`
-- `org.yaqmc.providers.netease`
-- `org.yaqmc.providers.kugou`
+- Spotify
+- NetEase Cloud Music
+- KuGou Music
 
-这是需要分别登录、分别管理账号时的推荐模式。登录状态按 `(platform, profileId)` 隔离，退出一个平台不会删除其他平台的状态。
+每个平台独立登录、独立存储凭据。QQ Music 继续由 YAQMC 注册。
 
-### 聚合模式
+### `aggregate`
 
-一个 Provider 的搜索和收藏库请求会并发请求已配置的外部平台，并在结果 ID 中保留来源，例如：
+保留上述三个独立 Provider，并额外注册 `YAQMC All Music Platforms` 联合 Provider。联合 Provider 聚合三个外部平台和 YAQMC 默认 Provider；歌曲保留来源 Provider、Profile 和完整原生曲目引用，播放与音质切换仍交给原平台，不串用账号或媒体 ID。未配置的 Spotify 不阻止其他平台返回歌曲。
 
-```text
-netease::163000001
-```
+切换模式后，音乐服务选项会异步刷新，不需要重启；两种模式也会在重启后保留。联合 Provider 没有另一个统一登录账号，登录仍在各平台完成。
 
-聚合结果中的来源由 `platform`、`profileId` 和 `trackId` 组成，歌词、歌曲详情和播放解析会按这个来源回到正确的平台。
+## 安装
 
-三个聚合包使用同一套 Backend 扇出逻辑，实际安装时只选择其中一个，否则结果会重复。当前 YAQMC 的账号界面是单 Provider 账号模型，因此需要分别登录和管理多个平台时使用独立模式；聚合模式主要用于统一搜索和库浏览。
+1. 在 YAQMC 插件页面安装 `org.yaqmc.providers.music-0.2.2.yaqmc-plugin`。
+2. 审核并授权清单中的 Provider、存储和平台 HTTPS 域名权限。
+3. 在插件设置中选择 `isolated` 或 `aggregate`。
+4. 如需 Spotify，在插件设置中填写自己的 `Spotify Client ID`。
+5. 在账号页面分别完成平台登录。
 
-## 工作方式
+插件包不包含账号、Client ID、Client Secret、Cookie、Token 或密码。
 
-```text
-YAQMC
-  │ Provider Component / Wasm
-  │ POST http://127.0.0.1:43821/v1
-  ▼
-本仓库 Backend
-  ├─ Spotify Web API / OAuth
-  ├─ 网易云兼容 API
-  └─ 酷狗兼容 API
-```
+当前插件 `0.2.2` 需要支持 `provider.comments` 的新版 YAQMC 宿主。网易云评论独立于歌词加载，支持热门/最新分页、头像、日期和楼中楼。回复线程完整读取后按时间倒序分页，完整排序最多读取 500 条；超过上限明确返回 `comments-limit-exceeded`。游标绑定歌曲、排序、父评论、账号配置及页大小，旧游标在升级后需要重新打开评论面板。
 
-Backend 只监听本机回环地址。它把 OAuth Token、平台 Cookie 和短期媒体代理状态保存到 `dataDir`，Wasm 插件本身不保存这些凭据。
+登录、音源、音质和版权由各平台实际响应决定；登录成功不代表会员权益或完整歌曲播放已获授权。插件不会绕过付费或版权限制。审计及当前验证范围见 [测试记录](docs/TEST-RESULTS.md)。
 
-## 前置条件
+## Spotify 配置
 
-- Windows 或 Linux
-- Rust `1.88` 或更新版本
-- `wasm32-wasip2` 编译目标
-- 支持 Provider Component API v3 的 YAQMC Desktop
-
-```powershell
-rustup target add wasm32-wasip2
-```
-
-### YAQMC 宿主要求
-
-插件清单申请的是精确权限：
-
-```text
-network:http://127.0.0.1:43821
-```
-
-不能改成 `localhost`、其他端口或网络通配符。YAQMC 宿主必须允许这个精确的本地 HTTP origin；如果你的 YAQMC 版本拒绝该权限，需要先升级或应用宿主侧的最小回环权限支持。本仓库不把 YAQMC Core 源码复制进来，也不负责自动修改 YAQMC。
-
-## 快速开始
-
-以下命令在本仓库根目录执行。
-
-### 1. 生成配置
-
-```powershell
-cargo run -p yaqmc-music-providers-backend -- init --path config.local.toml
-```
-
-编辑 `config.local.toml`。最小配置示例：
-
-```toml
-dataDir = "data"
-mode = "isolated"
-
-[listen]
-host = "127.0.0.1"
-port = 43821
-
-[spotify]
-clientId = "填入你自己的 Spotify Client ID"
-redirectUri = "http://127.0.0.1:43821/oauth/spotify/callback"
-
-[netease]
-baseUrl = "https://你的网易云兼容 API 地址"
-
-[kugou]
-baseUrl = "https://你的酷狗兼容 API 地址"
-```
-
-`mode` 是 Backend 的部署提示；真正决定插件行为的是下面的 `scripts/build.ps1 -Mode`。
-
-### 2. 配置 Spotify Client ID
-
-Client ID 必须由使用者提供。本仓库不包含 Client ID、Client Secret、Access Token、Refresh Token 或测试账号。
-
-可以写入 TOML，也可以使用环境变量；环境变量优先：
-
-```powershell
-$env:SPOTIFY_CLIENT_ID = "你的 Spotify Client ID"
-```
-
-在 Spotify Developer Dashboard 中登记完全一致的回调地址：
+在 [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) 创建 Web API 应用，并登记完全一致的 Redirect URI：
 
 ```text
 http://127.0.0.1:43821/oauth/spotify/callback
 ```
 
-当前流程使用 PKCE，不需要 Client Secret。没有 Client ID 时，Spotify Provider 可以安装和注册，但账号登录及依赖 Spotify 配置的请求会返回 `provider-not-configured`。
+然后把应用的 Client ID 填入 YAQMC 插件设置。不要把 Client Secret 写入插件配置。
 
-### 3. 配置网易云和酷狗 API
+Spotify 官方支持桌面/客户端应用使用 PKCE。Lyricify 4 的公开仓库仅提供自定义 Spotify API Client 配置文档，没有公开授权实现源码；本插件参考其“用户自备应用与精确回调地址”的使用方式，授权协议以 Spotify 官方 PKCE 流程为准。
 
-本仓库只实现客户端适配器，不捆绑或启动网易云、酷狗 API 服务。`baseUrl` 必须指向兼容本项目请求和响应格式的 HTTP JSON 服务；不能把普通网页地址当成 API 服务。
+## 构建
 
-也可以用环境变量覆盖：
+要求：
 
-```powershell
-$env:NETEASE_API_BASE_URL = "https://你的网易云兼容 API 地址"
-$env:KUGOU_API_BASE_URL = "https://你的酷狗兼容 API 地址"
-```
-
-生产环境使用 HTTPS。HTTP 只用于本机开发 Fixture。
-
-### 4. 启动 Backend
-
-Backend 必须保持运行：
+- Windows PowerShell 5.1 或 PowerShell 7
+- Rust 1.88
+- `wasm32-unknown-unknown` 目标
 
 ```powershell
-cargo run -p yaqmc-music-providers-backend -- serve --config config.local.toml
+pwsh ./scripts/build.ps1
 ```
 
-不要把监听地址改成公网地址。`dataDir/profiles.json` 包含登录凭据，应当当作密钥文件保护，也不应提交到 Git。
-
-### 5. 构建插件包
-
-独立模式：
-
-```powershell
-pwsh ./scripts/build.ps1 -Mode isolated
-```
-
-输出在 `dist/isolated/`：
+输出：
 
 ```text
-org.yaqmc.providers.spotify-0.1.0-isolated.yaqmc-plugin
-org.yaqmc.providers.netease-0.1.0-isolated.yaqmc-plugin
-org.yaqmc.providers.kugou-0.1.0-isolated.yaqmc-plugin
+dist/org.yaqmc.providers.music-0.2.2.yaqmc-plugin
 ```
 
-聚合模式：
+构建流程先生成无 WASI 的 Core Wasm，再由仓库内 `yaqmc-componentize` 工具编码为 WebAssembly Component。YAQMC 沙箱不会向插件开放 WASI 环境、文件系统或进程能力。
+
+## 验证
 
 ```powershell
-pwsh ./scripts/build.ps1 -Mode aggregate
-```
-
-输出在 `dist/aggregate/`。只安装其中一个聚合包。
-
-### 6. 在 YAQMC 中安装
-
-打开 YAQMC 的 **设置 → 插件 → 从文件安装**，选择对应的 `.yaqmc-plugin`。在权限审查页批准清单中的全部权限。
-
-所有包都需要：
-
-```text
-provider.catalog
-provider.playback
-provider.lyrics
-provider.account
-plugin.storage
-network:http://127.0.0.1:43821
-```
-
-Spotify 包还需要：
-
-```text
-network:https://accounts.spotify.com
-```
-
-启用后，在 YAQMC 的 Provider 列表中选择对应平台。安装或启用后如果出现 `network origin is not granted`，检查是否批准了精确的回环权限，并确认 Backend 端口仍为 `43821`。
-
-## 登录和播放边界
-
-- Spotify：通过浏览器 OAuth 完成登录；需要用户自己的 Client ID。登录不等于获得完整音频播放权限。
-- 网易云音乐：兼容 API 支持时，在 YAQMC 中使用二维码登录；二维码轮询、刷新和取消由 Backend 管理。
-- 酷狗音乐：兼容 API 支持时使用二维码登录。
-- 需要登录的收藏库、歌单和受限播放请求，必须先为当前 `profileId` 完成登录；公开搜索不一定需要登录。
-- `full-playback-unavailable` 表示上游没有返回可验证的完整音频源，不会把预览地址伪装成完整歌曲。
-
-## 真实 YAQMC 验证记录
-
-验证日期：2026-10-02。本仓库不仅运行 Rust 单元测试，还使用真实 YAQMC Electron + 生产 Core，在独立 QA 数据目录中通过 YAQMC IPC 安装和调用插件：
-
-- 独立模式：Spotify、网易云、酷狗三个包均能安装、启用并注册；Provider 列表同时保留 QQ Music。
-- 网易云：通过本地兼容 API Fixture 验证搜索、歌曲详情、歌词、Guest 账号状态，以及二维码登录的启动和取消。
-- 聚合模式：通过真实 YAQMC 验证跨平台搜索，并验证来源 ID `netease::163000001` 可以继续请求歌词和歌曲详情。
-- QQ Music：验证内置 Provider 与外部 Provider 共存；QQ 上游搜索可能受外部限流影响，不能把限流误判为插件安装失败。
-
-上述实时功能验证使用的是本地 Fixture，不代表已经验证了你的 Spotify Client ID、网易云账号、酷狗账号或生产 API。Spotify 真实 OAuth、酷狗生产 API 和完整音频播放需要用户提供凭据或兼容服务后再测。
-
-## 本地验证
-
-```powershell
-cargo test --workspace --locked
-cargo test --manifest-path plugins/guest-core/Cargo.toml --locked
+cargo test --manifest-path plugins/music/Cargo.toml --locked
 pwsh ./scripts/validate.ps1
 ```
 
-`validate.ps1` 会构建并检查独立模式和聚合模式的全部插件包，确认包内只有合法的 Wasm Component、清单权限和入口文件正确。
+`validate.ps1` 会检查：
 
-## 常见错误
+- 插件版本和 API v3 清单；
+- 三个 Provider 与联合 Provider 声明；
+- 包内只有一个 WebAssembly Component；
+- Component 不导入 WASI；
+- 包内没有 Backend、Node.js 或原生可执行文件。
 
-| 错误 | 处理 |
-| --- | --- |
-| `provider-not-configured` | 配置对应平台的 Client ID 或 `baseUrl`，然后重启 Backend |
-| `authentication-required` | 为当前 Provider/Profile 完成登录 |
-| `network origin is not granted` | 批准精确的 `network:http://127.0.0.1:43821` 权限 |
-| `full-playback-unavailable` | 检查上游是否提供带长度和音频 MIME 的完整音频源 |
-| Backend 无响应 | 确认 `serve` 进程仍在运行，且没有被防火墙或其他进程占用 `43821` |
+已完成的自动化与宿主级验证见 [`docs/TEST-RESULTS.md`](docs/TEST-RESULTS.md)。人工验收步骤见 [`docs/MANUAL-TEST.md`](docs/MANUAL-TEST.md)。
 
-## 目录
+## 安全边界
 
-```text
-crates/protocol/       Backend 与 Wasm 之间的版本化协议
-crates/platforms/      Spotify、网易云、酷狗适配器
-crates/backend/        本地 HTTP Backend、登录状态和媒体代理
-plugins/*/             YAQMC Provider Component
-wit/                   YAQMC Provider ABI
-scripts/               构建和包校验脚本
-docs/                  配置与集成细节
-```
+- 网络请求受清单 HTTPS Origin 限制；网易云媒体根域授权还覆盖其官方媒体子域，酷狗媒体 CDN 按精确域名授权。
+- 酷狗登录后的请求由 YAQMC 在宿主内注入 Token、用户 ID 并重新签名；插件不能通过签名接口读取已保存的凭据。
+- Spotify Token、网易云 Cookie、酷狗 Token 不写入插件 KV 或日志。
+- OAuth `state`、PKCE verifier、二维码 attempt/lease 均按 Profile 隔离。
+- 登录取消、过期和插件卸载会清理短期状态；删除插件数据时由 YAQMC 删除凭据句柄。
+- 插件不读取或修改 QQ 音乐凭据。
 
-更多实现细节见 [`docs/configuration.md`](docs/configuration.md)、[`docs/integration.md`](docs/integration.md) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+## 已知限制
+
+- Spotify Web API 不提供完整歌曲音频；本插件只暴露可验证的试听资源。
+- KuGou 收藏歌曲接口没有稳定可用的公开兼容协议；本插件不伪造收藏能力，`account.favorite-songs` 对 KuGou 返回 unsupported。
+- Spotify `playlist-read-private` 只授权读取本人或协作歌单；无权限歌单应返回授权拒绝，不能被解释成登录状态失效。
+- 平台私有接口可能变化，出现 `malformed-response` 时需要重新核对上游协议。
+- 自动化测试只能验证 OAuth 准备、生产二维码创建和未扫码轮询，不能替代真实账号人工授权。
+- 网易云支持歌曲/歌手/专辑/歌单搜索、首页、发现和相关目录；Spotify、酷狗仍有目录能力限制，未支持的操作明确返回错误。
+- 音质偏好按平台和 Profile 保存，支持当前歌曲切换；请求档位与实际资源档位分别显示。`automatic` 当前请求标准档，不代表自动选择最高会员档位。
+- Spotify 仅接受自动/标准试听档；酷狗不支持母带档。其他高音质是否可用由上游资源、版权与账号权益决定，不能保证无损、Hi-Res 或母带播放。登录成功不等于已确认会员权益。
+- 酷狗高音质被上游明确拒绝时，最多尝试四档已支持音质并记录降级原因；网络错误不会触发盲目降档，也不绕过付费限制。
+- 酷狗歌词候选须与歌曲标题匹配且时长差不超过两秒；无法核对时返回无歌词。保守筛选可能漏掉有效歌词，但不会直接采用明显不符的首条候选。
+- `crates/backend`、`crates/platforms` 和 `runtime` 是早期 sidecar 方案的历史代码，不会进入当前插件包，也不是运行依赖。
+
+## 参考实现
+
+- Spotify PKCE：Spotify Web API 官方文档
+- Spotify 自定义应用配置：`WXRIW/Lyricify-App` 的 Lyricify 4 Custom Client 文档
+- 网易云二维码协议：`NeteaseCloudMusicApiEnhanced/api-enhanced`
+- 酷狗二维码、签名与目录协议：`MakcRe/KuGouMusicApi`、`chthollyphile/folia-major`
+
+引用和改写范围见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

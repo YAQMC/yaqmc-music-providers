@@ -1,0 +1,9 @@
+{
+  "name": "yaqmc-providers-local-services",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "@neteasecloudmusicapienhanced/api": "4.40.1",
+    "kugoumusicapi": "https://codeload.github.com/MakcRe/KuGouMusicApi/tar.gz/da5ccfd9304c043085a2fd18e94ebc5c315044ab"
+  }
+}

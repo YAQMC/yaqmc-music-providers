@@ -85,7 +85,13 @@ where
     if let Some(platform) = backend_platform {
         backend_request["platform"] = json!(platform);
     }
-    let raw = decode_network_response(request(backend_request.to_string())?)?;
+    let response = request(backend_request.to_string()).map_err(|_| {
+        error(
+            "provider-backend-unavailable",
+            "the local provider backend could not be reached",
+        )
+    })?;
+    let raw = decode_network_response(response)?;
     let envelope: Value = serde_json::from_str(&raw)
         .map_err(|_| error("invalid-provider-response", "backend response is not JSON"))?;
     if envelope.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -788,6 +794,27 @@ mod tests {
     extern crate std;
 
     use super::*;
+
+    #[test]
+    fn all_packages_report_a_missing_backend_without_leaking_transport_details() {
+        for mode in ["isolated", "aggregate"] {
+            for platform in ["spotify", "netease", "kugou"] {
+                let failure = dispatch_with_mode(
+                    "test",
+                    platform,
+                    "provider.account",
+                    "account.snapshot",
+                    "{}",
+                    mode,
+                    |_| Err("private transport details".to_owned()),
+                )
+                .unwrap_err();
+                let value: Value = serde_json::from_str(&failure).unwrap();
+                assert_eq!(value["code"], "provider-backend-unavailable");
+                assert!(!failure.contains("private"));
+            }
+        }
+    }
 
     #[test]
     fn account_operations_use_separate_backend_lifecycle_routes() {

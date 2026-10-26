@@ -1,0 +1,110 @@
+{
+  "manifestVersion": 2,
+  "id": "org.yaqmc.providers.music",
+  "name": "YAQMC Music Platforms",
+  "description": "Spotify, NetEase Cloud Music, and KuGou provider in one self-contained plugin.",
+  "version": "0.2.2",
+  "apiVersion": 3,
+  "authors": ["YAQMC contributors"],
+  "repository": "https://github.com/YAQMC/yaqmc-music-providers",
+  "license": "MIT",
+  "platforms": ["windows", "linux"],
+  "entrypoints": { "component": "component/provider.wasm" },
+  "providers": [
+    {
+      "id": "org.yaqmc.providers.music.spotify",
+      "name": "Spotify",
+      "platform": "spotify",
+      "witVersion": "0.1.0",
+      "world": "provider-account",
+      "capabilities": ["provider.catalog", "provider.playback", "provider.lyrics", "provider.account"]
+    },
+    {
+      "id": "org.yaqmc.providers.music.netease",
+      "name": "NetEase Cloud Music",
+      "platform": "netease",
+      "witVersion": "0.1.0",
+      "world": "provider-account",
+      "capabilities": ["provider.catalog", "provider.playback", "provider.lyrics", "provider.comments", "provider.account"]
+    },
+    {
+      "id": "org.yaqmc.providers.music.kugou",
+      "name": "KuGou Music",
+      "platform": "kugou",
+      "witVersion": "0.1.0",
+      "world": "provider-account",
+      "capabilities": ["provider.catalog", "provider.playback", "provider.lyrics", "provider.account"]
+    }
+  ],
+  "federations": [
+    {
+      "id": "org.yaqmc.providers.music.aggregate",
+      "name": "YAQMC All Music Platforms",
+      "members": [
+        "org.yaqmc.providers.music.spotify",
+        "org.yaqmc.providers.music.netease",
+        "org.yaqmc.providers.music.kugou"
+      ],
+      "includeDefaultProvider": true
+    }
+  ],
+  "settingsSchema": {
+    "fields": [
+      {
+        "id": "mode",
+        "type": "select",
+        "label": "工作模式",
+        "description": "isolated 分开使用平台；aggregate 由 YAQMC 联合平台和 QQ 音乐。",
+        "options": ["isolated", "aggregate"],
+        "default": "isolated"
+      },
+      {
+        "id": "profileId",
+        "type": "text",
+        "label": "默认 profile",
+        "description": "用于隔离不同登录账号的本地凭据。",
+        "default": "default"
+      },
+      {
+        "id": "spotifyClientId",
+        "type": "text",
+        "label": "Spotify Client ID",
+        "description": "由用户提供；不需要 Client Secret。",
+        "default": ""
+      }
+    ]
+  },
+  "permissions": [
+    "provider.catalog",
+    "provider.playback",
+    "provider.lyrics",
+    "provider.comments",
+    "provider.account",
+    "plugin.storage",
+    "network:https://interfacepc.music.163.com",
+    "network:https://login-user.kugou.com",
+    "network:https://gateway.kugou.com",
+    "network:https://lyrics.kugou.com",
+    "network:https://trackercdn.kugou.com",
+    "network:https://fsandroid.kugou.com",
+    "network:https://fsandroid.tx.kugou.com",
+    "network:https://fsmobile.kugou.com",
+    "network:https://fsmobile.tx.kugou.com",
+    "network:https://h5.kugou.com",
+    "network:https://m.kugou.com",
+    "network:https://imge.kugou.com",
+    "network:https://music.163.com",
+    "network:https://openplat-user.kugou.com",
+    "network:https://cross.kugou.com",
+    "network:https://graph.qq.com",
+    "network:https://xui.ptlogin2.qq.com",
+    "network:https://ssl.ptlogin2.qq.com",
+    "network:https://ui.ptlogin2.qq.com",
+    "network:https://open.weixin.qq.com",
+    "network:https://music.126.net",
+    "network:https://accounts.spotify.com",
+    "network:https://api.spotify.com",
+    "network:https://p.scdn.co",
+    "network:https://i.scdn.co"
+  ]
+}

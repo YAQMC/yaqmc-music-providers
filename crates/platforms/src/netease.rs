@@ -194,8 +194,10 @@ impl PlatformAdapter for NeteaseClient {
                         .get("data")
                         .and_then(|data| data.get("qrimg"))
                         .and_then(Value::as_str)
-                        .or(Some(key))
-                        .map(ToOwned::to_owned),
+                        .filter(|image| image.starts_with("data:image/png;base64,"))
+                        .map(ToOwned::to_owned)
+                        .ok_or(PlatformError::InvalidResponse)
+                        .map(Some)?,
                     expires_at_ms: now_ms().saturating_add(5 * 60 * 1000),
                     verifier: Some(key.to_owned()),
                     state: None,
@@ -268,11 +270,14 @@ impl PlatformAdapter for NeteaseClient {
         let code = response.get("code").and_then(Value::as_i64).unwrap_or(0);
         match code {
             803 => Ok(AuthCompletion {
-                secret: Self::extract_cookie(&response),
+                secret: Some(
+                    Self::extract_cookie(&response).ok_or(PlatformError::InvalidResponse)?,
+                ),
                 ..AuthCompletion::default()
             }),
             800 => Err(PlatformError::Upstream("QR login expired".to_owned())),
-            _ => Err(PlatformError::AuthenticationPending),
+            801 | 802 => Err(PlatformError::AuthenticationPending),
+            _ => Err(PlatformError::InvalidResponse),
         }
     }
 
@@ -519,5 +524,43 @@ mod tests {
         assert_eq!(song.source.platform, Platform::Netease);
         assert_eq!(song.source.profile_id, "work");
         assert_eq!(song.source.track_id, "42");
+    }
+
+    #[tokio::test]
+    async fn qr_check_does_not_accept_missing_credentials_or_unknown_status() {
+        let server = httpmock::MockServer::start();
+        let client = NeteaseClient::new(NeteaseConfig {
+            base_url: server.base_url(),
+        })
+        .unwrap();
+        let session = ProfileSession::guest(Platform::Netease, "test");
+        let preparation = AuthPreparation {
+            verifier: Some("test-key".to_owned()),
+            ..AuthPreparation::default()
+        };
+        for (code, cookie) in [
+            (801, ""),
+            (802, ""),
+            (803, ""),
+            (803, "MUSIC_U=test"),
+            (500, ""),
+        ] {
+            let mut check = server.mock(|when, then| {
+                when.path("/login/qr/check").query_param("key", "test-key");
+                then.json_body(json!({"code": code, "cookie": cookie}));
+            });
+            let result = client
+                .complete_auth(&session, &preparation, &json!({}))
+                .await;
+            match code {
+                801 | 802 => assert!(matches!(result, Err(PlatformError::AuthenticationPending))),
+                803 if !cookie.is_empty() => {
+                    assert_eq!(result.unwrap().secret.as_deref(), Some(cookie))
+                }
+                _ => assert!(matches!(result, Err(PlatformError::InvalidResponse))),
+            }
+            check.assert();
+            check.delete();
+        }
     }
 }

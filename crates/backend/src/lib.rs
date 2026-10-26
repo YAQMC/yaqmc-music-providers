@@ -38,7 +38,7 @@ use yaqmc_music_providers_protocol::{
 
 const DEFAULT_CONFIG_FILE: &str = "config.toml";
 const DEFAULT_DATA_DIR: &str = "data";
-const DEFAULT_NETEASE_API: &str = "https://music.163.com";
+const DEFAULT_NETEASE_API: &str = "http://127.0.0.1:43823";
 const MAX_LINE_BYTES: usize = 128 * 1024;
 const MEDIA_TTL_MS: u64 = 10 * 60 * 1000;
 const MAX_MEDIA_ENTRIES: usize = 1024;
@@ -140,7 +140,9 @@ impl Default for AppConfig {
             netease: EndpointSettings {
                 base_url: DEFAULT_NETEASE_API.to_owned(),
             },
-            kugou: EndpointSettings::default(),
+            kugou: EndpointSettings {
+                base_url: "http://127.0.0.1:43824".to_owned(),
+            },
             http_auth_token: None,
         }
     }

@@ -6,5 +6,12 @@ artifacts/
 .env
 .env.*
 config.local.toml
+/config.qa.toml
 credentials.json
 *.yaqmc-plugin
+node_modules/
+runtime/data/
+runtime/logs/
+runtime/config.toml
+runtime/settings.json
+runtime/*.exe

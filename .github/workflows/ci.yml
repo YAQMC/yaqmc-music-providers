@@ -15,7 +15,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
-          targets: wasm32-wasip2
+          targets: wasm32-unknown-unknown
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
@@ -26,5 +26,14 @@ jobs:
       - run: cargo fmt --manifest-path plugins/spotify/Cargo.toml -- --check
       - run: cargo fmt --manifest-path plugins/netease/Cargo.toml -- --check
       - run: cargo fmt --manifest-path plugins/kugou/Cargo.toml -- --check
-      - run: pwsh ./scripts/build.ps1 -Mode isolated -OutputDirectory dist/ci
-      - run: pwsh ./scripts/validate.ps1 -SkipBuild
+      - run: cargo fmt --manifest-path plugins/music/Cargo.toml -- --check
+      - run: cargo test --manifest-path plugins/music/Cargo.toml --locked
+      - run: cargo clippy --manifest-path plugins/music/Cargo.toml --all-targets --locked -- -D warnings
+      - run: pwsh ./scripts/build.ps1 -OutputDirectory dist/ci
+      - run: pwsh ./scripts/validate.ps1 -SkipBuild -PackageDirectory dist/ci
+      - run: pwsh ./scripts/test-packaging.ps1 -PackageDirectory dist/ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: music-provider-wasm
+          path: dist/ci/*.yaqmc-plugin
+          if-no-files-found: error
