@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to release, e.g. v0.2.1 (must match manifest version)"
+        description: "Existing tag to release, e.g. v0.1.0 (must match manifest version)"
         required: true
       draft:
         description: "Create the release as a draft"

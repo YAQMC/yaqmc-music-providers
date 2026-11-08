@@ -2,7 +2,7 @@
 
 为 [YAQMC](https://github.com/YAQMC/YAQMC) 接入 **Spotify、网易云音乐和酷狗音乐**的音源插件，可与内置 QQ 音乐一起使用。
 
-三个平台打包为一个 `.yaqmc-plugin` 文件，在 YAQMC 的 WebAssembly 沙箱内运行，无需单独启动后端或安装 Node.js。当前插件版本为 **0.2.2**，要求 **YAQMC 0.1.2 或更新版本**，支持 Windows、Linux 和 Android。
+三个平台打包为一个 `.yaqmc-plugin` 文件，在 YAQMC 的 WebAssembly 沙箱内运行，无需单独启动后端或安装 Node.js。当前插件版本为 **0.1.0**，要求 **YAQMC 0.1.2 或更新版本**，支持 Windows、Linux 和 Android。
 
 ## 功能
 
@@ -30,7 +30,7 @@
 2. 在 YAQMC 的“插件 → 插件管理”中选择“选择文件”安装该文件，查看并授予平台网络访问等所需权限。
 3. 在插件详情的“配置”中选择工作模式，然后到账号页面登录需要使用的平台。Spotify 需先填写自己的 Client ID。
 
-也可以按照下方步骤从源码构建。插件安装包名为 `org.yaqmc.providers.music-0.2.2.yaqmc-plugin`。
+也可以按照下方步骤从源码构建。插件安装包名为 `org.yaqmc.providers.music-0.1.0.yaqmc-plugin`。
 
 ## 工作模式
 
@@ -98,7 +98,7 @@ pwsh ./scripts/build.ps1
 生成的插件包位于：
 
 ```text
-dist/org.yaqmc.providers.music-0.2.2.yaqmc-plugin
+dist/org.yaqmc.providers.music-0.1.0.yaqmc-plugin
 ```
 
 构建后验证包内容：
@@ -134,4 +134,4 @@ CI 会在推送和 Pull Request 时执行测试、格式检查、Clippy、构建
 
 ## 发布（维护者）
 
-`.github/workflows/release.yml` 只在推送 `v*` 标签或手动触发时运行，不会随普通推送发布。它要求标签与 `plugins/music/manifest.json` 的版本一致（例如 `v0.2.2`），重新执行测试、构建、`validate.ps1` 和 `test-packaging.ps1`，然后把 `.yaqmc-plugin` 与 `SHA256SUMS.txt` 上传为 GitHub Release 附件；手动触发默认创建草稿。版本号含 `-` 时标记为预发布。YAQMC 插件商店按未验证来源处理这些附件：GitHub 托管和摘要不等于发布者签名。
+`.github/workflows/release.yml` 只在推送 `v*` 标签或手动触发时运行，不会随普通推送发布。它要求标签与 `plugins/music/manifest.json` 的版本一致（例如 `v0.1.0`），重新执行测试、构建、`validate.ps1` 和 `test-packaging.ps1`，然后把 `.yaqmc-plugin` 与 `SHA256SUMS.txt` 上传为 GitHub Release 附件；手动触发默认创建草稿。版本号含 `-` 时标记为预发布。YAQMC 插件商店按未验证来源处理这些附件：GitHub 托管和摘要不等于发布者签名。
