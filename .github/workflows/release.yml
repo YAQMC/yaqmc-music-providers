@@ -1,0 +1,90 @@
+name: Release
+
+# Publishes the reviewed .yaqmc-plugin as a GitHub Release asset so the YAQMC plugin store
+# (topic `yaqmc-plugin`) can offer it. Runs only for version tags or a manual dispatch,
+# never on ordinary pushes.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. v0.2.1 (must match manifest version)"
+        required: true
+      draft:
+        description: "Create the release as a draft"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - id: version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content plugins/music/manifest.json -Raw | ConvertFrom-Json
+          $tag = if ("${{ github.event.inputs.tag }}") { "${{ github.event.inputs.tag }}" } else { "${{ github.ref_name }}" }
+          if ($tag -ne "v$($manifest.version)") {
+            throw "tag $tag does not match manifest version v$($manifest.version)"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "prerelease=$(([bool]($manifest.version -match '-')).ToString().ToLower())" >> $env:GITHUB_OUTPUT
+      - run: cargo test --manifest-path plugins/music/Cargo.toml --locked
+      - run: pwsh ./scripts/build.ps1 -OutputDirectory dist/release
+      - run: pwsh ./scripts/validate.ps1 -SkipBuild -PackageDirectory dist/release
+      - run: pwsh ./scripts/test-packaging.ps1 -PackageDirectory dist/release
+      - name: Checksums
+        working-directory: dist/release
+        run: sha256sum *.yaqmc-plugin > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: |
+            dist/release/*.yaqmc-plugin
+            dist/release/SHA256SUMS.txt
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    # Only this job can write; it uploads exactly the files validated above.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-package
+          path: release
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.package.outputs.tag }}
+          PRERELEASE: ${{ needs.package.outputs.prerelease }}
+          DRAFT: ${{ github.event.inputs.draft || 'false' }}
+        run: |
+          set -euo pipefail
+          flags=()
+          [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+          [ "$DRAFT" = "true" ] && flags+=(--draft)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/*.yaqmc-plugin release/SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" release/*.yaqmc-plugin release/SHA256SUMS.txt \
+              --repo "$GITHUB_REPOSITORY" --title "$TAG" --verify-tag --generate-notes "${flags[@]}"
+          fi
