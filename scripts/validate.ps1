@@ -59,6 +59,9 @@ function Test-ProviderPackage {
             ($manifest.permissions | ConvertTo-Json -Depth 20 -Compress) -ne ($expectedManifest.permissions | ConvertTo-Json -Depth 20 -Compress)) {
             throw "package capabilities or permissions do not match the source: $Path"
         }
+        if (($manifest.songBadges | ConvertTo-Json -Depth 20 -Compress) -ne ($expectedManifest.songBadges | ConvertTo-Json -Depth 20 -Compress)) {
+            throw "package song badges do not match the source: $Path"
+        }
         if ([string]::IsNullOrWhiteSpace($componentPath) -or -not ($names -contains $componentPath)) {
             throw "package component entrypoint is missing: $Path"
         }

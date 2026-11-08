@@ -27,6 +27,20 @@ try {
         @{ Name = 'extra-file'; Mutate = { param($zip) Write-Entry $zip 'unexpected.txt' ([byte[]]@(1)) } },
         @{ Name = 'empty-traversal'; Mutate = { param($zip) Write-Entry $zip '../unexpected.exe' ([byte[]]@()) } },
         @{ Name = 'core-wasm'; Mutate = { param($zip) Write-Entry $zip 'component/provider.wasm' ([byte[]]@(0,97,115,109,1,0,0,0)) } },
+        @{ Name = 'missing-song-badges'; Mutate = {
+            param($zip)
+            $reader = [IO.StreamReader]::new($zip.GetEntry('manifest.json').Open())
+            try { $changed = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            $changed.PSObject.Properties.Remove('songBadges')
+            Write-Entry $zip 'manifest.json' ([Text.Encoding]::UTF8.GetBytes(($changed | ConvertTo-Json -Depth 30)))
+        } },
+        @{ Name = 'tampered-song-badges'; Mutate = {
+            param($zip)
+            $reader = [IO.StreamReader]::new($zip.GetEntry('manifest.json').Open())
+            try { $changed = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            $changed.songBadges[0].providerIds = @('wrong.catalog')
+            Write-Entry $zip 'manifest.json' ([Text.Encoding]::UTF8.GetBytes(($changed | ConvertTo-Json -Depth 30)))
+        } },
         @{ Name = 'stale-permissions'; Mutate = {
             param($zip)
             $entry = $zip.GetEntry('manifest.json')
