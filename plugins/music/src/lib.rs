@@ -333,6 +333,36 @@ fn request_with_meta_headers_as<Body: DeserializeOwned>(
         "headers": headers,
         "responseFormat": "json",
     });
+    if url.split('?').next() == Some("https://gateway.kugou.com/playhistory/v1/get_songs") {
+        // Fixed history batches contain extensive unused metadata. Filter it
+        // before crossing the Wasm boundary without increasing sandbox limits.
+        request["responseJsonFields"] = json!([
+            "status",
+            "error_code",
+            "data",
+            "bp",
+            "has_more",
+            "songs",
+            "info",
+            "ot",
+            "hash",
+            "name",
+            "singername",
+            "singerinfo",
+            "id",
+            "album_id",
+            "albuminfo",
+            "cover",
+            "timelen",
+            "mixsongid",
+            "trans_param",
+            "union_cover",
+            "hash_offset",
+            "clip_hash",
+            "start_ms",
+            "end_ms"
+        ]);
+    }
     if let Some(body) = body {
         request["body"] = Value::String(body.to_owned());
     }
@@ -358,6 +388,11 @@ fn request_with_meta_headers_as<Body: DeserializeOwned>(
                 )
             {
                 "kugou-cloud-list"
+            } else if method == "POST"
+                && url.split('?').next()
+                    == Some("https://gateway.kugou.com/playhistory/v1/get_songs")
+            {
+                "kugou-play-history"
             } else {
                 "kugou-android"
             };
@@ -677,6 +712,11 @@ fn dispatch(
         ("provider.account", "account.favorite-songs") => favorite_songs(platform, payload),
         ("provider.account", "account.playlists") => account_playlists(platform, payload),
         ("provider.account", "account.playlist-tracks") => playlist_tracks(platform, payload),
+        ("provider.account", "account.recently-played") if platform == "kugou" => {
+            let profile = platform_id(payload);
+            account_profile_is_authenticated(platform, profile)?;
+            kugou_catalog::recently_played(profile, payload)
+        }
         ("provider.playback", "playback.set-preferred-quality") => {
             set_quality(platform, payload, false)
         }
@@ -1465,6 +1505,7 @@ fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
             &["songName"],
             &["filename"],
             &["fileName"],
+            &["name"],
         ],
     )
     .unwrap_or_else(|| "Untitled".to_owned());
@@ -1478,8 +1519,11 @@ fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
         ],
     )
     .unwrap_or_else(|| "Unknown".to_owned());
-    let album = first_string(item, &[&["album_name"], &["AlbumName"]])
-        .unwrap_or_else(|| "Unknown album".to_owned());
+    let album = first_string(
+        item,
+        &[&["album_name"], &["AlbumName"], &["albuminfo", "name"]],
+    )
+    .unwrap_or_else(|| "Unknown album".to_owned());
     let artwork = item
         .get("trans_param")
         .and_then(|value| value.get("union_cover"))
@@ -1492,6 +1536,11 @@ fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
         })
         .or_else(|| {
             item.get("imgUrl")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            item.get("cover")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
         })
@@ -1521,6 +1570,7 @@ fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
     let artists = item
         .get("Singers")
         .or_else(|| item.get("authors"))
+        .or_else(|| item.get("singerinfo"))
         .and_then(Value::as_array)
         .map(|values| {
             values
@@ -1575,7 +1625,7 @@ fn map_kugou_song(item: &Value, profile: &str) -> Option<Value> {
         song["album"]["id"] = json!(album_id.to_string());
         song["provider"]["albumId"] = json!(album_id.to_string());
     }
-    if let Some(mixsong_id) = ["MixSongID", "album_audio_id"]
+    if let Some(mixsong_id) = ["MixSongID", "album_audio_id", "mixsongid"]
         .iter()
         .find_map(|key| item.get(*key).and_then(|value| json_u64(value, &[])))
         .filter(|id| *id > 0)
@@ -2513,7 +2563,7 @@ fn capabilities(platform: &str, authenticated: bool) -> Value {
         "favoriteWrite": false,
         "playlistRead": authenticated,
         "playlistWrite": false,
-        "recentHistoryRead": false
+        "recentHistoryRead": authenticated && platform == "kugou"
     })
 }
 
@@ -3323,6 +3373,12 @@ fn kugou_page_number(offset: u64, page_limit: u64) -> Result<u64, String> {
     Ok(offset / page_limit + 1)
 }
 
+fn kugou_account_limit(payload: &Value) -> u64 {
+    // Cloud-list payloads carry substantially more metadata than catalog rows.
+    // Keep account pages within the component's unchanged execution budget.
+    limit(payload).min(20)
+}
+
 fn kugou_next_cursor(
     response: &Value,
     offset: u64,
@@ -3345,7 +3401,7 @@ fn kugou_next_cursor(
 
 fn kugou_playlists(profile: &str, payload: &Value) -> Result<String, String> {
     let offset = account_cursor(payload)?;
-    let page_limit = limit(payload);
+    let page_limit = kugou_account_limit(payload);
     let page = kugou_page_number(offset, page_limit)?;
     let response = kugou_request_body(
         profile,
@@ -3550,7 +3606,7 @@ fn kugou_playlist_tracks(
     payload: &Value,
 ) -> Result<String, String> {
     let offset = account_cursor(payload)?;
-    let page_limit = limit(payload);
+    let page_limit = kugou_account_limit(payload);
     let page = kugou_page_number(offset, page_limit)?;
     let response = kugou_request_body(
         profile,
@@ -5832,7 +5888,34 @@ mod tests {
     }
 
     #[test]
+    fn kugou_account_tracks_keep_cloud_and_history_display_fields() {
+        let song = map_kugou_song(
+            &json!({
+                "hash":"0123456789abcdef0123456789abcdef", "name":"Singer - Song",
+                "timelen":190537, "mixsongid":42, "album_id":3,
+                "albuminfo":{"name":"Album"},
+                "singerinfo":[{"id":7,"name":"Singer"}],
+                "cover":"http://imge.kugou.com/stdmusic/{size}/cover.jpg"
+            }),
+            "work",
+        )
+        .unwrap();
+        assert_eq!(song["title"], "Singer - Song");
+        assert_eq!(song["artists"][0]["id"], "7");
+        assert_eq!(song["album"]["title"], "Album");
+        assert_eq!(song["durationMs"], 190537);
+        assert_eq!(song["provider"]["numericId"], 42);
+        assert_eq!(song["provider"]["profileId"], "work");
+        assert_eq!(
+            song["artwork"]["src"],
+            "https://imge.kugou.com/stdmusic/400/cover.jpg"
+        );
+    }
+
+    #[test]
     fn account_pagination_advances_by_raw_items_and_rejects_no_progress() {
+        assert_eq!(kugou_account_limit(&json!({"limit":100})), 20);
+        assert_eq!(kugou_account_limit(&json!({"limit":5})), 5);
         assert_eq!(
             next_account_cursor(0, 2, true).unwrap(),
             Some("2".to_owned())

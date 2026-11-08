@@ -4,6 +4,7 @@ const PAGE_SIZE: u64 = 20;
 
 // Keep display and routing fields while skipping skins, tracking metadata and
 // unrelated nested resources before allocating them in the Wasm sandbox.
+#[derive(serde::Serialize)]
 struct CompactCatalog(Value);
 impl<'de> Deserialize<'de> for CompactCatalog {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -53,6 +54,7 @@ impl<'de> Deserialize<'de> for CompactCatalog {
                             | "singername"
                             | "singer"
                             | "singers"
+                            | "singerinfo"
                             | "authors"
                             | "name"
                             | "id"
@@ -686,18 +688,235 @@ pub(super) fn album(payload: &Value) -> Result<String, String> {
 }
 
 fn favorite_collection(item: &Value) -> bool {
-    json_u64(item, &["is_def"]) == Some(1)
-        && (matches!(
-            text(item, &["name"]).as_str(),
-            "我喜欢" | "我喜欢的音乐" | "喜欢的音乐"
-        ) || json_u64(item, &["listid"]) == Some(1))
+    // KuGou distinguishes the default collection (1) from liked songs (2).
+    // Names and list IDs are not a reliable substitute for this server flag.
+    json_u64(item, &["is_def"]) == Some(2)
+}
+
+#[derive(Deserialize)]
+struct HistoryResponse {
+    status: Option<u64>,
+    error_code: Option<u64>,
+    data: Option<HistoryData>,
+}
+#[derive(serde::Serialize, Deserialize)]
+struct HistoryData {
+    bp: Option<String>,
+    has_more: u64,
+    songs: Vec<HistorySong>,
+}
+#[derive(serde::Serialize, Deserialize)]
+struct HistorySong {
+    info: CompactCatalog,
+    ot: Option<u64>,
+}
+
+#[derive(Default, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryCursor {
+    profile: String,
+    account: String,
+    bp: Option<String>,
+    offset: usize,
+    anchor: Option<String>,
+    #[serde(default)]
+    cached: Option<String>,
+}
+
+fn history_cursor(payload: &Value, profile: &str, account: &str) -> Result<HistoryCursor, String> {
+    let Some(raw) = payload.get("cursor").filter(|v| !v.is_null()) else {
+        return Ok(HistoryCursor {
+            profile: profile.to_owned(),
+            account: account.to_owned(),
+            ..Default::default()
+        });
+    };
+    let invalid = || {
+        error(
+            "invalid-request",
+            "KuGou history cursor scope is invalid",
+            false,
+        )
+    };
+    let raw = raw
+        .as_str()
+        .filter(|s| s.len() <= 1024)
+        .ok_or_else(invalid)?;
+    let cursor: HistoryCursor = serde_json::from_str(raw).map_err(|_| invalid())?;
+    if cursor.profile != profile
+        || cursor.account != account
+        || cursor.offset > 500
+        || cursor
+            .bp
+            .as_ref()
+            .is_some_and(|bp| bp.is_empty() || bp.len() > 512 || bp.chars().any(char::is_control))
+        || cursor
+            .anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.len() != 32)
+        || (cursor.offset > 0 && cursor.anchor.is_none())
+        || cursor
+            .cached
+            .as_ref()
+            .is_some_and(|key| key.len() != 32 || !key.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(invalid());
+    }
+    Ok(cursor)
+}
+
+fn history_cache_key(profile: &str, account: &str, id: &str) -> String {
+    state_key("kugou", profile, &format!("history-{account}-{id}"))
+}
+
+fn cache_history(profile: &str, account: &str, data: &HistoryData) -> Result<String, String> {
+    let id = md5_hex(&random_token("history_")?);
+    let index_key = state_key("kugou", profile, "history-cache");
+    let mut keys: Vec<String> = storage_get(&index_key)?
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    let key = history_cache_key(profile, account, &id);
+    #[derive(serde::Serialize)]
+    struct Cached<'a> {
+        created: u64,
+        data: &'a HistoryData,
+    }
+    let bytes = serde_json::to_vec(&Cached {
+        created: now_ms(),
+        data,
+    })
+    .map_err(|_| malformed())?;
+    yaqmc::provider::storage::cache_put(&key, &bytes)?;
+    keys.push(key);
+    while keys.len() > 4 {
+        let _ = yaqmc::provider::storage::cache_delete(&keys.remove(0));
+    }
+    storage_set(
+        &index_key,
+        &serde_json::to_string(&keys).map_err(|_| malformed())?,
+    )?;
+    Ok(id)
+}
+
+fn history_page(
+    data: HistoryData,
+    mut cursor: HistoryCursor,
+    size: usize,
+    fetched_at_ms: u64,
+) -> Result<String, String> {
+    if data.has_more > 1 || data.songs.len() > 500 || cursor.offset > data.songs.len() {
+        return Err(malformed());
+    }
+    let anchor = data.songs.first().map(|song| {
+        md5_hex(&format!(
+            "{}:{}",
+            text(&song.info.0, &["hash"]),
+            song.ot.unwrap_or(0)
+        ))
+    });
+    if cursor.anchor.is_some() && cursor.anchor != anchor {
+        return Err(error(
+            "provider-unavailable",
+            "KuGou history changed; reload from the first page",
+            true,
+        ));
+    }
+    let end = cursor.offset.saturating_add(size).min(data.songs.len());
+    let items = data.songs[cursor.offset..end].iter().filter_map(|item| {
+        let song = map_kugou_song(&item.info.0, &cursor.profile)?;
+        Some(json!({"song":song,"playedAtMs":item.ot.and_then(|t|t.checked_mul(1000)),"source":"provider-account"}))
+    }).collect();
+    let next = if end < data.songs.len() {
+        cursor.offset = end;
+        cursor.anchor = anchor;
+        Some(serde_json::to_string(&cursor).map_err(|_| malformed())?)
+    } else if data.has_more == 1 {
+        let bp = data
+            .bp
+            .filter(|bp| !bp.is_empty() && bp.len() <= 512 && !bp.chars().any(char::is_control))
+            .ok_or_else(malformed)?;
+        if data.songs.is_empty() || cursor.bp.as_ref() == Some(&bp) {
+            return Err(malformed());
+        }
+        cursor.bp = Some(bp);
+        cursor.offset = 0;
+        cursor.anchor = None;
+        cursor.cached = None;
+        Some(serde_json::to_string(&cursor).map_err(|_| malformed())?)
+    } else {
+        None
+    };
+    Ok(account_page_value(items, next, None, fetched_at_ms).to_string())
+}
+
+pub(super) fn recently_played(profile: &str, payload: &Value) -> Result<String, String> {
+    let handle = credential_handle(&credential_key("kugou", profile, "cookie-api"))?
+        .ok_or_else(|| error("authentication-expired", "account login is required", false))?;
+    let mut cursor = history_cursor(payload, profile, &md5_hex(&handle))?;
+    if let Some(id) = &cursor.cached {
+        let raw =
+            yaqmc::provider::storage::cache_get(&history_cache_key(profile, &cursor.account, id))?
+                .ok_or_else(|| {
+                    error(
+                        "provider-unavailable",
+                        "KuGou history page expired; reload from the first page",
+                        true,
+                    )
+                })?;
+        #[derive(Deserialize)]
+        struct Cached {
+            created: u64,
+            data: HistoryData,
+        }
+        let cached: Cached = serde_json::from_slice(&raw).map_err(|_| malformed())?;
+        if now_ms().saturating_sub(cached.created) > 5 * 60 * 1000 {
+            return Err(error(
+                "provider-unavailable",
+                "KuGou history page expired; reload from the first page",
+                true,
+            ));
+        }
+        return history_page(
+            cached.data,
+            cursor,
+            limit(payload).min(10) as usize,
+            now_ms(),
+        );
+    }
+    let mut body = json!({"source_classify":"app","to_subdivide_sr":1});
+    if let Some(bp) = &cursor.bp {
+        body["bp"] = json!(bp);
+    }
+    let response = kugou_request_inner_as::<HistoryResponse>(
+        "POST",
+        KUGOU_API,
+        "/playhistory/v1/get_songs",
+        &[],
+        Some(&handle),
+        Some(&body.to_string()),
+        KugouSignature::Android,
+        None,
+        false,
+    )?;
+    require_kugou_success(
+        &json!({"status":response.status,"error_code":response.error_code}),
+        "/playhistory/v1/get_songs",
+    )?;
+    // The upstream uses fixed batches. Bound projection work within the Wasm
+    // fuel budget and retain the unread offset in the continuation cursor.
+    let mut data = response.data.ok_or_else(malformed)?;
+    data.songs
+        .sort_by_key(|item| core::cmp::Reverse(item.ot.unwrap_or(0)));
+    cursor.cached = Some(cache_history(profile, &cursor.account, &data)?);
+    history_page(data, cursor, limit(payload).min(10) as usize, now_ms())
 }
 pub(super) fn favorite_songs(profile: &str, payload: &Value) -> Result<String, String> {
-    for page in 1..=10 {
+    const LOOKUP_SIZE: u64 = 20;
+    for page in 1..=25 {
         let response = kugou_request_body(
             profile,
             "/v7/get_all_list",
-            &json!({"total_ver":979,"type":2,"page":page,"pagesize":50}).to_string(),
+            &json!({"total_ver":979,"type":2,"page":page,"pagesize":LOOKUP_SIZE}).to_string(),
         )?;
         let raw = kugou_list_items(&response)?;
         if let Some(item) = raw.iter().find(|item| favorite_collection(item)) {
@@ -712,8 +931,8 @@ pub(super) fn favorite_songs(profile: &str, payload: &Value) -> Result<String, S
             }
             return Ok(detail["tracks"].to_string());
         }
-        if raw.len() < 50
-            || kugou_collection_total(&response).is_some_and(|total| page * 50 >= total)
+        if raw.len() < LOOKUP_SIZE as usize
+            || kugou_collection_total(&response).is_some_and(|total| page * LOOKUP_SIZE >= total)
         {
             return Err(error(
                 "not-found",
@@ -779,11 +998,73 @@ mod tests {
     #[test]
     fn favorite_lookup_uses_the_system_collection_not_arbitrary_names() {
         assert!(favorite_collection(
-            &json!({"is_def":1,"listid":1,"name":"我喜欢"})
+            &json!({"is_def":2,"listid":2,"name":"我喜欢"})
+        ));
+        assert!(!favorite_collection(
+            &json!({"is_def":1,"listid":1,"name":"默认收藏"})
         ));
         assert!(!favorite_collection(
             &json!({"is_def":0,"listid":2,"name":"我喜欢"})
         ));
+        assert!(favorite_collection(
+            &json!({"is_def":2,"listid":9,"name":"Renamed"})
+        ));
+    }
+
+    fn history_fixture() -> HistoryData {
+        serde_json::from_value(json!({"bp":"next-batch", "has_more":1, "songs":[
+            {"ot":1700000003,"info":{"hash":"hash-3","name":"Three","singerinfo":[{"id":7,"name":"Singer"}],"timelen":190537}},
+            {"ot":1700000002,"info":{"hash":"hash-2","name":"Two"}},
+            {"ot":1700000001,"info":{"hash":"hash-1","name":"One"}}
+        ]})).unwrap()
+    }
+
+    #[test]
+    fn history_pages_keep_unread_rows_timestamps_and_upstream_continuation() {
+        let cursor = history_cursor(&json!({}), "work", "account-a").unwrap();
+        let page: Value =
+            serde_json::from_str(&history_page(history_fixture(), cursor, 2, 1).unwrap()).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
+        assert_eq!(page["items"][0]["song"]["title"], "Three");
+        assert_eq!(page["items"][0]["playedAtMs"], 1700000003000_u64);
+        assert_eq!(page["items"][0]["source"], "provider-account");
+        let payload = json!({"cursor":page["nextCursor"]});
+        let cursor = history_cursor(&payload, "work", "account-a").unwrap();
+        assert!(history_cursor(&payload, "other", "account-a").is_err());
+        assert!(history_cursor(&payload, "work", "account-b").is_err());
+        let second: Value =
+            serde_json::from_str(&history_page(history_fixture(), cursor, 2, 1).unwrap()).unwrap();
+        assert_eq!(second["items"][0]["song"]["title"], "One");
+        let next =
+            history_cursor(&json!({"cursor":second["nextCursor"]}), "work", "account-a").unwrap();
+        assert_eq!(next.bp.as_deref(), Some("next-batch"));
+        assert_eq!(next.offset, 0);
+        assert!(next.cached.is_none());
+        let end = HistoryData {
+            bp: None,
+            has_more: 0,
+            songs: Vec::new(),
+        };
+        let last: Value = serde_json::from_str(&history_page(end, next, 2, 1).unwrap()).unwrap();
+        assert!(last["nextCursor"].is_null());
+    }
+
+    #[test]
+    fn history_rejects_changed_batches_and_nonprogressing_pagination() {
+        let mut cursor = history_cursor(&json!({}), "work", "account-a").unwrap();
+        cursor.offset = 1;
+        cursor.anchor = Some("0".repeat(32));
+        assert!(history_page(history_fixture(), cursor, 2, 1).is_err());
+        let mut cursor = history_cursor(&json!({}), "work", "account-a").unwrap();
+        cursor.bp = Some("next-batch".to_owned());
+        assert!(history_page(history_fixture(), cursor, 50, 1).is_err());
+        let data = HistoryData {
+            bp: Some("next".to_owned()),
+            has_more: 1,
+            songs: Vec::new(),
+        };
+        assert!(history_page(data, HistoryCursor::default(), 2, 1).is_err());
+        assert!(history_cursor(&json!({"cursor":"x".repeat(1025)}), "work", "account-a").is_err());
     }
     #[test]
     fn playlist_cursors_are_bound_to_resource_and_profile() {
