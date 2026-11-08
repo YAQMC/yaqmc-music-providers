@@ -3,12 +3,13 @@
   "id": "org.yaqmc.providers.music",
   "name": "YAQMC Music Platforms",
   "description": "Spotify, NetEase Cloud Music, and KuGou provider in one self-contained plugin.",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "apiVersion": 3,
+  "engines": { "yaqmc": ">=0.1.2" },
   "authors": ["YAQMC contributors"],
   "repository": "https://github.com/YAQMC/yaqmc-music-providers",
   "license": "MIT",
-  "platforms": ["windows", "linux"],
+  "platforms": ["windows", "linux", "android"],
   "entrypoints": { "component": "component/provider.wasm" },
   "providers": [
     {
@@ -17,7 +18,12 @@
       "platform": "spotify",
       "witVersion": "0.1.0",
       "world": "provider-account",
-      "capabilities": ["provider.catalog", "provider.playback", "provider.lyrics", "provider.account"]
+      "capabilities": [
+        "provider.catalog",
+        "provider.playback",
+        "provider.lyrics",
+        "provider.account"
+      ]
     },
     {
       "id": "org.yaqmc.providers.music.netease",
@@ -25,7 +31,13 @@
       "platform": "netease",
       "witVersion": "0.1.0",
       "world": "provider-account",
-      "capabilities": ["provider.catalog", "provider.playback", "provider.lyrics", "provider.comments", "provider.account"]
+      "capabilities": [
+        "provider.catalog",
+        "provider.playback",
+        "provider.lyrics",
+        "provider.comments",
+        "provider.account"
+      ]
     },
     {
       "id": "org.yaqmc.providers.music.kugou",
@@ -33,7 +45,13 @@
       "platform": "kugou",
       "witVersion": "0.1.0",
       "world": "provider-account",
-      "capabilities": ["provider.catalog", "provider.playback", "provider.lyrics", "provider.comments", "provider.account"]
+      "capabilities": [
+        "provider.catalog",
+        "provider.playback",
+        "provider.lyrics",
+        "provider.comments",
+        "provider.account"
+      ]
     }
   ],
   "federations": [
@@ -74,7 +92,49 @@
       }
     ]
   },
+  "songBadges": [
+    {
+      "id": "source-qqmusic",
+      "providerIds": ["qqmusic"],
+      "label": "QQ Music",
+      "labels": {
+        "zh-CN": "QQ音乐",
+        "zh-TW": "QQ音樂",
+        "en-US": "QQ Music"
+      },
+      "color": "#31c27c"
+    },
+    {
+      "id": "source-netease",
+      "providerIds": ["org.yaqmc.providers.music.netease"],
+      "label": "NetEase Cloud Music",
+      "labels": {
+        "zh-CN": "网易云音乐",
+        "zh-TW": "網易雲音樂",
+        "en-US": "NetEase Cloud Music"
+      },
+      "color": "#e60026"
+    },
+    {
+      "id": "source-kugou",
+      "providerIds": ["org.yaqmc.providers.music.kugou"],
+      "label": "KuGou Music",
+      "labels": {
+        "zh-CN": "酷狗音乐",
+        "zh-TW": "酷狗音樂",
+        "en-US": "KuGou Music"
+      },
+      "color": "#2a8ff7"
+    },
+    {
+      "id": "source-spotify",
+      "providerIds": ["org.yaqmc.providers.music.spotify"],
+      "label": "Spotify",
+      "color": "#1db954"
+    }
+  ],
   "permissions": [
+    "ui.songBadges",
     "provider.catalog",
     "provider.playback",
     "provider.lyrics",
