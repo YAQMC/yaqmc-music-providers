@@ -10,8 +10,9 @@ const loginPlatform = ['--login-netease', '--login-kugou'].includes(keepProfile)
 const browserLogin = /^--browser-(netease|kugou)-(qq|wechat)$/.exec(keepProfile ?? '');
 const catalogProbe = keepProfile === '--catalog-netease';
 const prepareUi = keepProfile === '--prepare-ui-netease';
-if (!coreInput || !pluginInput || (keepProfile && keepProfile !== '--keep-profile' && !loginPlatform && !browserLogin && !catalogProbe && !prepareUi)) {
-  throw new Error('Usage: node scripts/test-host-smoke.mjs <core.exe> <plugin.yaqmc-plugin> [--keep-profile | --login-netease | --login-kugou]');
+const federationProbe = keepProfile === '--federation';
+if (!coreInput || !pluginInput || (keepProfile && keepProfile !== '--keep-profile' && !loginPlatform && !browserLogin && !catalogProbe && !prepareUi && !federationProbe)) {
+  throw new Error('Usage: node scripts/test-host-smoke.mjs <core.exe> <plugin.yaqmc-plugin> [--keep-profile | --login-netease | --login-kugou | --federation]');
 }
 const coreSourcePath = resolve(coreInput);
 const pluginPath = resolve(pluginInput);
@@ -57,8 +58,8 @@ function startCore() {
     YAQMC_PLUGIN_FALLBACK_DIR: join(root, 'plugins'),
     YAQMC_LOG_FALLBACK_DIR: join(root, 'logs'),
     YAQMC_DOWNLOAD_DIR: join(root, 'downloads'),
-    HTTP_PROXY: 'http://127.0.0.1:10808',
-    HTTPS_PROXY: 'http://127.0.0.1:10808',
+    HTTP_PROXY: process.env.HTTP_PROXY ?? 'http://127.0.0.1:10808',
+    HTTPS_PROXY: process.env.HTTPS_PROXY ?? 'http://127.0.0.1:10808',
     NO_PROXY: '127.0.0.1,localhost',
   },
   stdio: ['pipe', 'pipe', 'pipe'],
@@ -113,7 +114,9 @@ function receive(timeoutMs = 120000) {
 }
 
 let nextId = 1;
-async function request(method, params, timeoutMs = 120000, origin = 'main') {
+// Debug builds of the host can need longer; override with YAQMC_SMOKE_TIMEOUT_MS.
+const defaultTimeoutMs = Number(process.env.YAQMC_SMOKE_TIMEOUT_MS ?? 120000);
+async function request(method, params, timeoutMs = defaultTimeoutMs, origin = 'main') {
   const id = nextId++;
   send({ kind: 'request', id, method, params, origin });
   for (;;) {
@@ -302,10 +305,120 @@ async function testQr(providerId) {
   return {imageBytes:started.qrImageDataUri.length,heartbeats:states};
 }
 
-function sourceRoute(song) {
-  const id = song.provider?.trackId;
+function decodeRoute(id) {
   if (!id?.startsWith('yaqmc-federated:')) return undefined;
   return JSON.parse(Buffer.from(id.slice('yaqmc-federated:'.length), 'base64url').toString('utf8'));
+}
+
+function sourceRoute(song) {
+  return decodeRoute(song.provider?.trackId);
+}
+
+// The host wraps provider failures; report the provider's own code.
+function errorCode(error) {
+  const text = String(error.message);
+  return (/"details"\s*:\s*\{"code"\s*:\s*"([a-zA-Z0-9_.-]+)"/.exec(text) ?? /"code"\s*:\s*"([a-zA-Z0-9_.-]+)"/.exec(text))?.[1] ?? 'unknown';
+}
+
+async function playSample(song) {
+  if (!playbackAvailable) return {playbackNotTested: 'audio-output-unavailable'};
+  try {
+    const playing = await request('player_play_tracks', {request: {tracks: [song], startAtId: song.id, shuffle: false}}, 180000);
+    if (playing.playbackState !== 'playing') throw new Error(JSON.stringify(playing.playbackError));
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const advanced = await request('player_snapshot');
+    return {preview: playing.sourceSelection?.preview, advancedPositionMs: advanced.positionMs};
+  } catch (error) {
+    return {playbackError: errorCode(error)};
+  } finally {
+    await request('player_pause').catch(() => undefined);
+    await request('player_hydrate_queue', {tracks: []}).catch(() => undefined);
+  }
+}
+
+// Public catalog without account or search: discover -> playlist -> song, lyrics, artwork, playback.
+async function testQishuiCatalog() {
+  const scope = {providerId: 'org.yaqmc.providers.music.qishui', profileId: 'default'};
+  const discover = await request('provider_discover', {...scope, refresh: true});
+  const listed = discover.popularSonglists?.[0];
+  if (!listed?.id) throw new Error('Qishui discover returned no public playlists');
+  const playlist = await request('provider_playlist', {...scope, id: listed.id});
+  if (!playlist.tracks?.length || playlist.tracks.some(track => track.provider?.providerId !== scope.providerId)) {
+    throw new Error('Qishui playlist did not return provider-scoped tracks');
+  }
+  const sample = playlist.tracks.find(track => track.availability?.status !== 'unavailable');
+  const song = await request('provider_song', {...scope, id: sample.id});
+  const lyrics = await request('provider_lyrics', {...scope, id: song.id}).catch(error => ({error: errorCode(error)}));
+  const artwork = await request('provider_cache_artwork', {...scope, url: song.artwork.src});
+  if (!artwork.startsWith('data:image/')) throw new Error('Qishui artwork was not cached');
+  const search = {};
+  for (const kind of ['song', 'playlist']) {
+    search[kind] = await request('provider_search', {...scope, query: '周杰伦', kind, page: 1, limit: 20})
+      .then(value => ({items: value.items.length}), error => ({error: errorCode(error)}));
+  }
+  return {
+    playlistTracks: playlist.tracks.length,
+    unavailableTracks: playlist.tracks.filter(track => track.availability?.status === 'unavailable').length,
+    sampleAvailability: song.availability?.status,
+    lyricLines: lyrics?.lines?.length ?? 0,
+    lyricSync: lyrics?.syncMode ?? lyrics?.error,
+    search,
+    playback: await playSample(song),
+  };
+}
+
+async function testSpotifyGuest() {
+  const scope = {providerId: 'org.yaqmc.providers.music.spotify', profileId: 'default'};
+  const search = await request('provider_search', {...scope, query: 'test', kind: 'song', page: 1, limit: 20})
+    .then(() => 'unexpected-success', error => errorCode(error));
+  if (search !== 'provider-not-configured') throw new Error(`Spotify guest search did not report the web-player blocker: ${search}`);
+  const snapshot = await request('provider_account_snapshot', scope);
+  if (snapshot.state !== 'guest' || snapshot.capabilities?.playlistRead) throw new Error('Spotify guest mode advertised account features');
+  return {search, accountState: snapshot.state};
+}
+
+// Host-owned routing: per-member pages, routed IDs, origin badges, and playlist opening.
+async function testAggregateCatalog(query) {
+  const scope = {providerId: 'org.yaqmc.providers.music.aggregate', profileId: 'default'};
+  const result = {};
+  const firstPlaylists = new Map();
+  for (const kind of ['song', 'playlist']) {
+    const seen = new Set();
+    const pages = [];
+    for (const page of [1, 2]) {
+      const value = await request('provider_search', {...scope, query, kind, page, limit: 20});
+      if (value.kind !== kind || value.page !== page || !Array.isArray(value.items) || value.items.length > 20 || (page === 1 && !value.items.length)) {
+        throw new Error(`aggregate ${kind} search page ${page} is invalid`);
+      }
+      const origins = {};
+      let repeated = 0;
+      for (const item of value.items) {
+        const route = decodeRoute(item.id);
+        if (!route?.providerId || !route.trackId) throw new Error(`aggregate ${kind} item is not routed`);
+        if (kind === 'song' && item.provider?.originProviderId !== route.providerId) throw new Error('aggregate song lost its source badge origin');
+        if (seen.has(item.id)) repeated++;
+        seen.add(item.id);
+        origins[route.providerId] = (origins[route.providerId] ?? 0) + 1;
+        if (kind === 'playlist' && page === 1 && !firstPlaylists.has(route.providerId)) firstPlaylists.set(route.providerId, item);
+      }
+      pages.push({page, count: value.items.length, hasMore: value.hasMore, origins, repeatedFromEarlierPages: repeated});
+    }
+    result[kind] = pages;
+  }
+  result.openedPlaylists = {};
+  for (const [origin, item] of firstPlaylists) {
+    try {
+      const playlist = await request('provider_playlist', {...scope, id: item.id});
+      const foreign = playlist.tracks.filter(track => sourceRoute(track)?.providerId !== origin || track.provider?.originProviderId !== origin);
+      if (foreign.length) throw new Error(`playlist from ${origin} returned tracks routed elsewhere`);
+      const sample = playlist.tracks.find(track => track.availability?.status !== 'unavailable');
+      const lyrics = sample ? await request('provider_lyrics', {...scope, id: sample.id}).then(value => value?.lines?.length ?? 0, error => errorCode(error)) : 'no-sample';
+      result.openedPlaylists[origin] = {tracks: playlist.tracks.length, lyricLines: lyrics, playback: sample ? await playSample(sample) : 'no-sample'};
+    } catch (error) {
+      result.openedPlaylists[origin] = {error: error.message.replace(/https?:\/\/[^\s'"<>]+/g, '[url]')};
+    }
+  }
+  return result;
 }
 
 async function testSpotifyPreparation() {
@@ -631,6 +744,21 @@ try {
     process.stdout.write(`${JSON.stringify({name:'reported-song',passed:true,lyrics:reported.lines.length,comments:reported.comments.length,positiveLikeCounts:reported.comments.filter(item=>item.likedCount>0).length})}\n`);
   } else if (loginPlatform) {
     await testInteractiveLogin(loginPlatform);
+  } else if (federationProbe) {
+    const isolated = await assertProviderMode('isolated');
+    await request('player_set_volume', {volume: 0}).catch(error => {
+      if (!error.message.includes('No usable audio output device is available')) throw error;
+      playbackAvailable = false;
+    });
+    const result = {plugin: {id: installed.id, version: installed.version}, isolated, playbackAvailable};
+    result.qishui = await testQishuiCatalog();
+    result.spotifyGuest = await testSpotifyGuest();
+    await request('plugin_settings_set', {request: {id: installed.id, values: {mode: 'aggregate'}}});
+    result.aggregateProviders = await assertProviderMode('aggregate');
+    result.aggregate = await testAggregateCatalog('周杰伦');
+    await request('plugin_settings_set', {request: {id: installed.id, values: {mode: 'isolated'}}});
+    result.isolatedAfterSwitch = await assertProviderMode('isolated');
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else {
   const initialProviders = await assertProviderMode('isolated');
   const preferences = {spotify: 'standard', netease: 'lossless', kugou: 'high'};
