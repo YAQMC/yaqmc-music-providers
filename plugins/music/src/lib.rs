@@ -1693,19 +1693,60 @@ fn song_value(
     song
 }
 
+/// A configured Client ID selects the official Web API with OAuth; a blank one
+/// selects the web-player catalog. Failures never switch transports.
+#[derive(Debug, PartialEq, Eq)]
+enum SpotifyTransport {
+    WebApi(String),
+    WebPlayer,
+}
+
+fn spotify_transport_for(client_id: Option<String>) -> SpotifyTransport {
+    match client_id.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => SpotifyTransport::WebApi(id.to_owned()),
+        _ => SpotifyTransport::WebPlayer,
+    }
+}
+
+fn spotify_transport() -> SpotifyTransport {
+    spotify_transport_for(setting("spotifyClientId"))
+}
+
+/// Runs an official Web API call only on the OAuth transport; guest mode never
+/// reads, sends, or clears the stored OAuth credentials.
+fn spotify_oauth<T>(
+    transport: SpotifyTransport,
+    call: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<T, String> {
+    match transport {
+        SpotifyTransport::WebApi(client_id) => call(&client_id),
+        // The web-player token endpoint answers third-party clients with HTTP
+        // 400 "Unauthorized request" unless they replay a TOTP secret taken
+        // from Spotify's own bundle, which this plugin does not do.
+        SpotifyTransport::WebPlayer => Err(error(
+            "provider-not-configured",
+            "Spotify guest catalog is unavailable: Spotify's web-player token endpoint does not permit third-party clients. Set your own Spotify Client ID to use the official Web API.",
+            false,
+        )),
+    }
+}
+
 fn spotify_client_id() -> Result<String, String> {
-    setting("spotifyClientId")
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            error(
-                "provider-not-configured",
-                "Spotify Client ID must be configured in the plugin settings",
-                false,
-            )
-        })
+    match spotify_transport() {
+        SpotifyTransport::WebApi(client_id) => Ok(client_id),
+        SpotifyTransport::WebPlayer => Err(error(
+            "provider-not-configured",
+            "Spotify Client ID must be configured in the plugin settings",
+            false,
+        )),
+    }
 }
 
 fn spotify_access(profile: &str) -> Result<(String, u64), String> {
+    spotify_oauth(spotify_transport(), |_| spotify_oauth_access(profile))
+}
+
+fn spotify_oauth_access(profile: &str) -> Result<(String, u64), String> {
     let handle_key = credential_key("spotify", profile, "access-token");
     let expiry_key = state_key("spotify", profile, "access-expires");
     let handle = credential_handle(&handle_key)?;
@@ -2635,7 +2676,11 @@ fn snapshot(platform: &str, payload: &Value) -> Result<String, String> {
     }
     let result = match platform {
         "spotify" => {
-            if credential_handle(&credential_key(platform, &profile, "refresh-token"))?.is_some() {
+            // Guest mode keeps any stored OAuth session but does not expose it.
+            if spotify_transport() != SpotifyTransport::WebPlayer
+                && credential_handle(&credential_key(platform, &profile, "refresh-token"))?
+                    .is_some()
+            {
                 spotify_account_snapshot(&profile)
             } else {
                 guest_snapshot(platform, &profile, "guest", None)
@@ -5491,6 +5536,48 @@ mod tests {
             malformed[field] = value;
             assert!(spotify_token_response(&malformed, true).is_err());
         }
+    }
+
+    #[test]
+    fn spotify_transport_is_selected_only_by_the_trimmed_client_id() {
+        for blank in [None, Some(""), Some("   "), Some("\t\n")] {
+            assert_eq!(
+                spotify_transport_for(blank.map(ToOwned::to_owned)),
+                SpotifyTransport::WebPlayer
+            );
+        }
+        assert_eq!(
+            spotify_transport_for(Some("  client-id \n".to_owned())),
+            SpotifyTransport::WebApi("client-id".to_owned())
+        );
+    }
+
+    #[test]
+    fn spotify_oauth_failures_never_fall_back_and_guest_mode_never_touches_oauth() {
+        let expired = error(
+            "authentication-expired",
+            "Spotify authorization is required",
+            false,
+        );
+        let mut seen = None;
+        let result: Result<(), String> = spotify_oauth(
+            SpotifyTransport::WebApi("client-id".to_owned()),
+            |client_id| {
+                seen = Some(client_id.to_owned());
+                Err(expired.clone())
+            },
+        );
+        assert_eq!(result.unwrap_err(), expired);
+        assert_eq!(seen.as_deref(), Some("client-id"));
+        let guest: Result<(), String> = spotify_oauth(SpotifyTransport::WebPlayer, |_| {
+            unreachable!("OAuth used in guest mode")
+        });
+        let guest: Value = serde_json::from_str(&guest.unwrap_err()).unwrap();
+        assert_eq!(guest["code"], "provider-not-configured");
+        assert!(guest["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Spotify guest catalog"));
     }
 
     #[test]
