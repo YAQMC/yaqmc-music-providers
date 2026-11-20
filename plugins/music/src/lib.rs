@@ -709,7 +709,7 @@ fn dispatch(
         }
         ("provider.playback", "playback.resolve")
         | ("provider.playback", "playback.resolve-client-fallback") => playback(platform, payload),
-        ("provider.account", "account.auth.login-methods") => Ok(login_methods(platform)),
+        ("provider.account", "account.auth.login-methods") => login_methods(platform),
         ("provider.account", "account.auth.prepare-oauth") => prepare_oauth(platform, payload),
         ("provider.account", "account.auth.start-qr") => start_qr(platform, payload),
         ("provider.account", "account.auth.complete-oauth") => complete_oauth(platform, payload),
@@ -792,14 +792,9 @@ fn artwork_data_uri(platform: &str, payload: &Value) -> Result<String, String> {
     })
 }
 
-fn login_methods(platform: &str) -> String {
-    match platform {
-        "spotify" => json!([{
-            "id": "browser-oauth",
-            "label": "Spotify browser login (PKCE)",
-            "flow": "oauth"
-        }])
-        .to_string(),
+fn login_methods(platform: &str) -> Result<String, String> {
+    Ok(match platform {
+        "spotify" => return spotify_login_methods(spotify_transport()),
         "netease" => json!([{
             "id": "qq", "label": "QQ 登录", "flow": "oauth"
         }, {
@@ -821,7 +816,20 @@ fn login_methods(platform: &str) -> String {
         }])
         .to_string(),
         _ => "[]".to_owned(),
-    }
+    })
+}
+
+/// PKCE needs the user's Client ID; without one there is nothing to offer, so
+/// report the missing configuration instead of an unusable login button.
+fn spotify_login_methods(transport: SpotifyTransport) -> Result<String, String> {
+    spotify_oauth(transport, |_| {
+        Ok(json!([{
+            "id": "browser-oauth",
+            "label": "Spotify browser login (PKCE)",
+            "flow": "oauth"
+        }])
+        .to_string())
+    })
 }
 
 fn state_key(platform: &str, profile: &str, name: &str) -> String {
@@ -4850,7 +4858,7 @@ mod tests {
     #[test]
     fn music_platforms_advertise_browser_qq_and_wechat_with_platform_scoped_sessions() {
         for platform in ["netease", "kugou"] {
-            let methods: Value = serde_json::from_str(&login_methods(platform)).unwrap();
+            let methods: Value = serde_json::from_str(&login_methods(platform).unwrap()).unwrap();
             for method in ["qq", "wechat"] {
                 assert!(methods
                     .as_array()
@@ -5601,6 +5609,23 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("Spotify guest catalog"));
+    }
+
+    #[test]
+    fn spotify_offers_pkce_login_only_with_a_configured_client_id() {
+        let guest: Value = serde_json::from_str(
+            &spotify_login_methods(spotify_transport_for(Some("  ".to_owned()))).unwrap_err(),
+        )
+        .unwrap();
+        assert_eq!(guest["code"], "provider-not-configured");
+        let configured: Value = serde_json::from_str(
+            &spotify_login_methods(spotify_transport_for(Some("client-id".to_owned()))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            configured,
+            json!([{"id": "browser-oauth", "label": "Spotify browser login (PKCE)", "flow": "oauth"}])
+        );
     }
 
     #[test]

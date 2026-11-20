@@ -91,6 +91,8 @@ QQ、微信入口仍受平台验证规则限制；授权完成后，平台可能
 
 游客模式的阻碍：Spotify 网页播放器的匿名令牌接口（`open.spotify.com/api/token`）要求附带一次性验证码，该验证码只能用网页播放器包内嵌的密钥生成；不附带时返回 HTTP 400 “Unauthorized request”，并注明第三方使用不符合 Spotify 开发者条款。目录接口没有该令牌时返回 401。插件不复制这些密钥，也不读取浏览器 Cookie，因此不提供游客目录。
 
+未填写 Client ID 时，插件不再提供“Spotify browser login (PKCE)”登录方式，而是对登录方式查询返回 `provider-not-configured`。当前 YAQMC 宿主在查询失败时仍会显示内置的 PKCE 按钮作为旧版兜底；点击后只会提示平台配置未完成。请在“插件 → 插件管理”中打开本插件的配置填写 Client ID。
+
 两种方式的状态彼此独立：清空 Client ID 不会删除已保存的 OAuth 会话，游客模式也不会使用或发送这些凭据，账号页显示为未登录、不提供私人功能；重新填写 Client ID 后恢复原会话。OAuth 出错、令牌过期或 API 失败时只返回该错误，不会改用游客模式。
 
 使用官方 Web API：

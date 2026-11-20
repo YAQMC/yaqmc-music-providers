@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn account_surface_is_a_permanent_guest_without_private_features() {
-        assert_eq!(login_methods("qishui"), "[]");
+        assert_eq!(login_methods("qishui").unwrap(), "[]");
         let advertised = capabilities("qishui", false);
         assert!(advertised
             .as_object()

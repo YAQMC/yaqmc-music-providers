@@ -374,7 +374,27 @@ async function testSpotifyGuest() {
   if (search !== 'provider-not-configured') throw new Error(`Spotify guest search did not report the web-player blocker: ${search}`);
   const snapshot = await request('provider_account_snapshot', scope);
   if (snapshot.state !== 'guest' || snapshot.capabilities?.playlistRead) throw new Error('Spotify guest mode advertised account features');
-  return {search, accountState: snapshot.state};
+  return {search, accountState: snapshot.state, loginMethods: await loginMethodsFor('spotify')};
+}
+
+async function loginMethodsFor(platform) {
+  return request('provider_account_login_methods', {providerId: `org.yaqmc.providers.music.${platform}`, profileId: 'default'})
+    .then(methods => methods.map(method => `${method.id}:${method.flow}`), error => `error:${errorCode(error)}`);
+}
+
+// Each provider reports its own login actions, in any order, without stale values from another.
+async function testLoginMethodIsolation() {
+  const expected = {spotify: 'error:provider-not-configured', qishui: '', netease: 'qq:oauth,wechat:oauth,qr:qr'};
+  const observed = [];
+  for (const platform of ['spotify', 'qishui', 'netease', 'qishui', 'spotify']) {
+    const methods = await loginMethodsFor(platform);
+    const value = Array.isArray(methods) ? methods.join(',') : methods;
+    if (value !== expected[platform]) throw new Error(`${platform} login methods were ${value}`);
+    observed.push({platform, methods: value});
+  }
+  const qishui = await request('provider_account_snapshot', {providerId: 'org.yaqmc.providers.music.qishui', profileId: 'default'});
+  if (qishui.state !== 'guest' || Object.values(qishui.capabilities ?? {}).some(Boolean)) throw new Error('Qishui advertised an account capability');
+  return {observed, qishuiState: qishui.state, qishuiCapabilities: qishui.capabilities};
 }
 
 // Host-owned routing: per-member pages, routed IDs, origin badges, and playlist opening.
@@ -423,10 +443,9 @@ async function testAggregateCatalog(query) {
 
 async function testSpotifyPreparation() {
   const scope = {providerId: 'org.yaqmc.providers.music.spotify', profileId: 'default'};
-  const methods = await request('provider_account_login_methods', scope);
-  if (!methods.some(item => item.id === 'browser-oauth' && item.flow === 'oauth')) {
-    throw new Error('Spotify PKCE login method is missing');
-  }
+  // Without a Client ID there is no usable login; with one, PKCE is offered.
+  const guestMethods = await request('provider_account_login_methods', scope).then(() => 'offered', errorCode);
+  if (guestMethods !== 'provider-not-configured') throw new Error(`Spotify offered login without a Client ID: ${guestMethods}`);
   let rendererPrepareDenied = false;
   try {
     await request('provider_auth_oauth_prepare', {...scope, methodId: 'browser-oauth'});
@@ -446,6 +465,10 @@ async function testSpotifyPreparation() {
   const fixtureClientId = '00000000000000000000000000000000';
   try {
     await request('plugin_settings_set', {request: {id: 'org.yaqmc.providers.music', values: {spotifyClientId: fixtureClientId}}});
+    const methods = await request('provider_account_login_methods', scope);
+    if (!methods.some(item => item.id === 'browser-oauth' && item.flow === 'oauth')) {
+      throw new Error('Spotify PKCE login method is missing with a configured Client ID');
+    }
     const prepared = await request('provider_auth_oauth_prepare', {...scope, methodId: 'browser-oauth'}, 120000, 'host');
     const url = new URL(prepared.url);
     const callback = 'http://127.0.0.1:43821/oauth/spotify/callback';
@@ -753,6 +776,9 @@ try {
     const result = {plugin: {id: installed.id, version: installed.version}, isolated, playbackAvailable};
     result.qishui = await testQishuiCatalog();
     result.spotifyGuest = await testSpotifyGuest();
+    // Configured Client ID offers PKCE; clearing it again returns to guest without login actions.
+    result.spotifyConfigured = await testSpotifyPreparation();
+    result.loginMethods = await testLoginMethodIsolation();
     await request('plugin_settings_set', {request: {id: installed.id, values: {mode: 'aggregate'}}});
     result.aggregateProviders = await assertProviderMode('aggregate');
     result.aggregate = await testAggregateCatalog('周杰伦');
