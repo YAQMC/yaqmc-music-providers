@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "org.yaqmc.providers.music",
   "name": "YAQMC Music Platforms",
-  "description": "Spotify, NetEase Cloud Music, and KuGou provider in one self-contained plugin.",
+  "description": "Spotify, NetEase Cloud Music, KuGou, and Qishui Music provider in one self-contained plugin.",
   "version": "0.1.0",
   "apiVersion": 3,
   "engines": { "yaqmc": ">=0.1.2" },
@@ -50,6 +50,19 @@
         "provider.playback",
         "provider.lyrics",
         "provider.comments",
+        "provider.account"
+      ]
+    },
+    {
+      "id": "org.yaqmc.providers.music.qishui",
+      "name": "Qishui Music",
+      "platform": "qishui",
+      "witVersion": "0.1.0",
+      "world": "provider-account",
+      "capabilities": [
+        "provider.catalog",
+        "provider.playback",
+        "provider.lyrics",
         "provider.account"
       ]
     }
@@ -131,6 +144,17 @@
       "providerIds": ["org.yaqmc.providers.music.spotify"],
       "label": "Spotify",
       "color": "#1db954"
+    },
+    {
+      "id": "source-qishui",
+      "providerIds": ["org.yaqmc.providers.music.qishui"],
+      "label": "Qishui Music",
+      "labels": {
+        "zh-CN": "汽水音乐",
+        "zh-TW": "汽水音樂",
+        "en-US": "Qishui Music"
+      },
+      "color": "#00b386"
     }
   ],
   "permissions": [
@@ -167,6 +191,14 @@
     "network:https://accounts.spotify.com",
     "network:https://api.spotify.com",
     "network:https://p.scdn.co",
-    "network:https://i.scdn.co"
+    "network:https://i.scdn.co",
+    "network:https://beta-luna.douyin.com",
+    "network:https://api.qishui.com",
+    "network:https://v3-luna.douyinvod.com",
+    "network:https://v5-ex-luna.douyinvod.com",
+    "network:https://v11-luna.douyinvod.com",
+    "network:https://v26-luna.douyinvod.com",
+    "network:https://p3-luna.douyinpic.com",
+    "network:https://p6-luna.douyinpic.com"
   ]
 }

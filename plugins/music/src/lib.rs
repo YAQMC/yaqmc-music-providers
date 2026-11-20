@@ -7,6 +7,7 @@ mod kugou_comments;
 mod kugou_lyrics;
 mod netease_catalog;
 mod netease_comments;
+mod qishui;
 
 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyInit};
 use aes::Aes128;
@@ -108,7 +109,7 @@ impl Guest for MusicProvider {
             .get("platform")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if !matches!(platform, "spotify" | "netease" | "kugou") {
+        if !matches!(platform, "spotify" | "netease" | "kugou" | "qishui") {
             return Err(error(
                 "invalid-request",
                 "the provider platform is missing or unsupported",
@@ -362,6 +363,9 @@ fn request_with_meta_headers_as<Body: DeserializeOwned>(
             "start_ms",
             "end_ms"
         ]);
+    }
+    if url.starts_with(&format!("{}/", qishui::LUNA)) {
+        request["responseJsonFields"] = json!(&qishui::LUNA_FIELDS[..]);
     }
     if let Some(body) = body {
         request["body"] = Value::String(body.to_owned());
@@ -685,6 +689,13 @@ fn dispatch(
         ("provider.catalog", "catalog.artist-page") if platform == "netease" => {
             netease_catalog::artist_page(payload)
         }
+        ("provider.catalog", "catalog.search") if platform == "qishui" => qishui::search(payload),
+        ("provider.catalog", "catalog.song") if platform == "qishui" => qishui::song(payload),
+        ("provider.catalog", "catalog.playlist") if platform == "qishui" => {
+            qishui::playlist(payload)
+        }
+        ("provider.catalog", "catalog.discover") if platform == "qishui" => qishui::discover(),
+        ("provider.lyrics", "lyrics.get") if platform == "qishui" => qishui::lyrics(payload),
         ("provider.catalog", "catalog.status") => provider_status(platform, payload),
         ("provider.catalog", "catalog.search") => search(platform, payload),
         ("provider.catalog", "catalog.song") => song_detail(platform, payload),
@@ -741,6 +752,7 @@ fn artwork_request_url(platform: &str, url: &str) -> Option<String> {
         "netease" => host.ends_with(".music.126.net") && !host.contains(['@', ':']),
         "kugou" => ["imge.kugou.com", "singerimg.kugou.com", "c1.kgimg.com"].contains(&host),
         "spotify" => host == "i.scdn.co",
+        "qishui" => qishui::IMAGE_HOSTS.contains(&host),
         _ => false,
     };
     if !allowed {
@@ -826,7 +838,7 @@ fn validate_quality<'quality>(
     ) {
         return Err(error("invalid-request", "audio quality is invalid", false));
     }
-    if (platform == "spotify" && !matches!(quality, "automatic" | "standard"))
+    if (matches!(platform, "spotify" | "qishui") && !matches!(quality, "automatic" | "standard"))
         || (platform == "kugou" && quality == "master")
     {
         return Err(unsupported("audio quality"));
@@ -853,15 +865,21 @@ fn status_value(platform: &str, profile: &str, quality: &str) -> Value {
         "displayName": match platform {
             "spotify" => "Spotify",
             "netease" => "NetEase Cloud Music",
+            "qishui" => "Qishui Music",
             _ => "KuGou Music",
         },
         "connection": "ready",
         "message": "",
         "preferredQuality": quality,
         "capabilities": {
-            "search": true, "album": platform != "spotify", "artist": platform != "spotify", "playlist": platform != "spotify",
-            "lyrics": platform != "spotify", "wordTimedLyrics": platform == "kugou",
-            "streaming": true, "qualitySelection": platform != "spotify",
+            "search": true,
+            "album": !matches!(platform, "spotify" | "qishui"),
+            "artist": !matches!(platform, "spotify" | "qishui"),
+            "playlist": platform != "spotify",
+            "lyrics": platform != "spotify",
+            "wordTimedLyrics": matches!(platform, "kugou" | "qishui"),
+            "streaming": true,
+            "qualitySelection": !matches!(platform, "spotify" | "qishui"),
         }
     })
 }
@@ -2599,7 +2617,7 @@ fn qr_snapshot(
 
 fn capabilities(platform: &str, authenticated: bool) -> Value {
     json!({
-        "qrLogin": platform != "spotify",
+        "qrLogin": matches!(platform, "netease" | "kugou"),
         "favoriteRead": authenticated,
         "favoriteWrite": false,
         "playlistRead": authenticated,
@@ -2700,6 +2718,8 @@ fn snapshot(platform: &str, payload: &Value) -> Result<String, String> {
                 guest_snapshot(platform, &profile, "guest", None)
             }
         }
+        // Qishui account login is not supported; it is always a public guest.
+        "qishui" => guest_snapshot(platform, &profile, "guest", None),
         _ => Err(unsupported("account.snapshot")),
     };
     session_snapshot_result(platform, &profile, result)
@@ -3844,6 +3864,9 @@ fn playback(platform: &str, payload: &Value) -> Result<String, String> {
         return Err(error("invalid-request", "track ID is empty", false));
     }
     let quality = playback_quality(platform, payload, &id)?;
+    if platform == "qishui" {
+        return qishui::playback(&id, &quality);
+    }
     let (url, length, mime, preview, resolved, rights_fallback) = match platform {
         "spotify" => {
             let access = spotify_access(profile)?;

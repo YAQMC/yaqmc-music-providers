@@ -45,7 +45,7 @@ fn offset(raw: &str) -> i64 {
         .unwrap_or(0)
 }
 
-fn parse(raw: &str, song_id: &str) -> Result<Value, String> {
+pub(super) fn parse(raw: &str, song_id: &str) -> Result<Value, String> {
     if raw.len() > MAX_LYRIC_BYTES {
         return Err(malformed());
     }

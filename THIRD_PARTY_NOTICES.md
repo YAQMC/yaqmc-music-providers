@@ -14,7 +14,34 @@ This file records public references used for protocol compatibility. The shipped
 | [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) | `da5ccfd9304c043085a2fd18e94ebc5c315044ab`; `user_detail`, `cryptoRSAEncrypt`, `user_playlist`, and `playlist_track_all_new` rechecked 2026-10-08 | MIT | KuGou account detail, right-padded RSA signature, account playlist, and playlist-track endpoint shapes; implementation independently rewritten |
 | [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) | `62730f900dc9fdc51396a663b3d33a6c4c704046` | MIT | KuGou artist/album/playlist search and details, recommendations, charts, POST body signing, official preview resources, read-only song comments/replies, and KRC request/XOR/zlib format; sort endpoints also checked against service responses; implementation independently rewritten |
 | [miniz_oxide](https://github.com/Frommi/miniz_oxide) | `0.8.9` | MIT OR Zlib OR Apache-2.0 | Pure Rust, output-bounded zlib decompression for KRC lyrics inside the Wasm component |
+| [guowenye/qishui-api](https://github.com/guowenye/qishui-api) | `e409c10fe7441a10d370da7da61d62bbc1e5126c`; routes rechecked 2026-11-20 | MIT | Qishui Music public discover, playlist-detail, H5 track/lyric, and PC search endpoints and response shapes; implementation independently written in Rust, no source copied. Its PlayAuth/spade decryption is deliberately not used |
 | [margbug01/MySpotify](https://github.com/margbug01/MySpotify) | `f84e2e7537cbf6ea1dcba897d44b7e4d25cbf761` | AGPL-3.0 | Behavioral reference only for Spotify guest browsing; established that its guest token depends on secrets embedded in Spotify's web player, so no guest transport was implemented. No code, assets, or credentials copied |
 | [chthollyphile/folia-major](https://github.com/chthollyphile/folia-major) | `1f2c32a5d91afd1446a9ca8e7d4305ca6f9f22ed` | MIT | KuGou search and mobile song-detail endpoint/response-shape reference; implementation independently rewritten |
 
 The repository still contains historical sidecar experiments under `crates/backend`, `crates/platforms`, and `runtime`. They are not copied into the `.yaqmc-plugin` archive and are not required at runtime.
+
+## qishui-api license notice
+
+```text
+MIT License
+
+Copyright (c) 2026 arrow
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

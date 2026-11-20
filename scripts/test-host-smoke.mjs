@@ -134,7 +134,7 @@ async function assertProviderMode(mode) {
   const aggregate = ids.includes('org.yaqmc.providers.music.aggregate');
   const expected = [
     'qqmusic',
-    ...['spotify', 'netease', 'kugou'].map(platform => `org.yaqmc.providers.music.${platform}`),
+    ...['spotify', 'netease', 'kugou', 'qishui'].map(platform => `org.yaqmc.providers.music.${platform}`),
   ];
   if (mode === 'aggregate') expected.push('org.yaqmc.providers.music.aggregate');
   if (

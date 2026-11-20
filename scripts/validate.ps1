@@ -42,8 +42,8 @@ function Test-ProviderPackage {
         if ($manifest.manifestVersion -ne 2 -or $manifest.apiVersion -ne 3) {
             throw "package is not an API v3 component: $Path"
         }
-        if (@($manifest.providers).Count -ne 3) {
-            throw "package must declare exactly three platform providers: $Path"
+        if (@($manifest.providers).Count -ne 4) {
+            throw "package must declare exactly four platform providers: $Path"
         }
         if ($manifest.permissions -contains "network:http://127.0.0.1:43821") {
             throw "package still grants the old loopback backend origin: $Path"
