@@ -49,10 +49,20 @@ function Test-ProviderPackage {
             throw "package still grants the old loopback backend origin: $Path"
         }
         $componentPath = [string]$manifest.entrypoints.component
-        if ($entries.Count -ne 2 -or $names -notcontains 'component/provider.wasm' -or $componentPath -ne 'component/provider.wasm') {
-            throw "package must contain only its manifest and component: $Path"
+        $expectedPaths = @('manifest.json', 'component/provider.wasm', 'assets/spotify-player.html', 'assets/hls.min.js', 'assets/hls.min.js.LICENSE', 'assets/hls.LICENSE-APACHE', 'assets/player.LICENSE')
+        if ($entries.Count -ne $expectedPaths.Count -or @($expectedPaths | Where-Object { $names -notcontains $_ }).Count -gt 0 -or $componentPath -ne 'component/provider.wasm') {
+            throw "package must contain its component, player assets and license notices: $Path"
         }
-        if ($manifest.id -ne 'org.yaqmc.providers.music' -or $manifest.version -ne $expectedManifest.version) {
+        foreach ($asset in @('spotify-player.html', 'hls.min.js', 'hls.min.js.LICENSE', 'hls.LICENSE-APACHE', 'player.LICENSE')) {
+            $assetStream = $archive.GetEntry("assets/$asset").Open()
+            $memory = [IO.MemoryStream]::new()
+            try { $assetStream.CopyTo($memory) } finally { $assetStream.Dispose() }
+            $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($memory.ToArray()))
+            $memory.Dispose()
+            $expected = (Get-FileHash -LiteralPath (Join-Path $repositoryRoot "plugins/music/assets/$asset") -Algorithm SHA256).Hash
+            if ($actual -ne $expected) { throw "package player asset differs from source: $asset" }
+        }
+        if ($manifest.id -ne 'org.yaqmc.providers.music' -or $manifest.version -ne $expectedManifest.version -or $manifest.license -ne $expectedManifest.license) {
             throw "package identity does not match the current source manifest: $Path"
         }
         if (($manifest.providers | ConvertTo-Json -Depth 20 -Compress) -ne ($expectedManifest.providers | ConvertTo-Json -Depth 20 -Compress) -or

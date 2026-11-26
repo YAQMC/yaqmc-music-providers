@@ -8,6 +8,7 @@ mod kugou_lyrics;
 mod netease_catalog;
 mod netease_comments;
 mod qishui;
+mod spotify_web;
 
 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyInit};
 use aes::Aes128;
@@ -88,6 +89,7 @@ const PLUGIN_ID: &str = "org.yaqmc.providers.music";
 const DEFAULT_PROFILE: &str = "default";
 const SPOTIFY_ACCOUNTS: &str = "https://accounts.spotify.com";
 const SPOTIFY_API: &str = "https://api.spotify.com";
+const SPOTIFY_OPEN: &str = "https://open.spotify.com";
 const NETEASE_API: &str = "https://interfacepc.music.163.com";
 const KUGOU_API: &str = "https://gateway.kugou.com";
 const KUGOU_LOGIN: &str = "https://login-user.kugou.com";
@@ -310,6 +312,32 @@ fn request_with_meta_headers_as<Body: DeserializeOwned>(
     credential_body: Option<(&str, &str)>,
     extra_headers: &[(&str, String)],
 ) -> Result<JsonResponse<Body>, String> {
+    request_with_meta_headers_and_credentials_as(
+        method,
+        url,
+        body,
+        content_type,
+        credential,
+        credential_body,
+        extra_headers,
+        &[],
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep the explicit host network and credential bindings together"
+)]
+fn request_with_meta_headers_and_credentials_as<Body: DeserializeOwned>(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    content_type: Option<&str>,
+    credential: Option<(&str, &str, &str)>,
+    credential_body: Option<(&str, &str)>,
+    extra_headers: &[(&str, String)],
+    extra_credentials: &[(&str, &str, &str)],
+) -> Result<JsonResponse<Body>, String> {
     let mut headers = Map::new();
     headers.insert(
         "accept".to_owned(),
@@ -367,15 +395,19 @@ fn request_with_meta_headers_as<Body: DeserializeOwned>(
     if url.starts_with(&format!("{}/", qishui::LUNA)) {
         request["responseJsonFields"] = json!(&qishui::LUNA_FIELDS[..]);
     }
+    if url == "https://api-partner.spotify.com/pathfinder/v2/query" {
+        request["responseJsonFields"] = json!(spotify_web::RESPONSE_FIELDS);
+    }
     if let Some(body) = body {
         request["body"] = Value::String(body.to_owned());
     }
+    let mut credential_headers = Vec::new();
     if let Some((handle, name, prefix)) = credential {
-        request["credentialHeaders"] = json!([{
+        credential_headers.push(json!({
             "handle": handle,
             "name": name,
             "prefix": prefix,
-        }]);
+        }));
         if name == "cookie"
             && (url.starts_with("https://gateway.kugou.com/")
                 || url.starts_with("https://trackercdn.kugou.com/"))
@@ -406,6 +438,16 @@ fn request_with_meta_headers_as<Body: DeserializeOwned>(
             });
         }
     }
+    for (handle, name, prefix) in extra_credentials {
+        credential_headers.push(json!({
+            "handle": handle,
+            "name": name,
+            "prefix": prefix,
+        }));
+    }
+    if !credential_headers.is_empty() {
+        request["credentialHeaders"] = Value::Array(credential_headers);
+    }
     if let Some((handle, name)) = credential_body {
         request["credentialBodyFields"] = json!([{
             "handle": handle,
@@ -413,7 +455,7 @@ fn request_with_meta_headers_as<Body: DeserializeOwned>(
         }]);
     }
     let raw = yaqmc::provider::network::request(&request.to_string())
-        .map_err(|_| error("offline", "the upstream music service is unavailable", true))?;
+        .map_err(|reason| network_request_error(&reason))?;
     let response: NetworkResponse<Body> = serde_json::from_str(&raw).map_err(|_| {
         error(
             "malformed-response",
@@ -449,6 +491,38 @@ fn request_with_meta_headers_as<Body: DeserializeOwned>(
         content_length: response.content_length,
         mime_type: response.mime_type,
     })
+}
+
+fn network_request_error(reason: &str) -> String {
+    let (code, message, retryable) = match reason {
+        "plugin network request timed out" => ("timeout", "the upstream request timed out", true),
+        "plugin network host could not be resolved"
+        | "plugin network connection failed"
+        | "plugin network request failed" => {
+            ("offline", "the upstream music service is unavailable", true)
+        }
+        "plugin network origin is not granted" => (
+            "authorization-rejected",
+            "the plugin is missing permission for the upstream service",
+            false,
+        ),
+        reason
+            if reason.starts_with("plugin network header ")
+                && reason.ends_with(" is not allowed") =>
+        {
+            (
+                "client-unsupported",
+                "YAQMC does not support a request header required by this provider",
+                false,
+            )
+        }
+        _ => (
+            "provider-failure",
+            "YAQMC could not complete the provider request",
+            false,
+        ),
+    };
+    error(code, message, retryable)
 }
 
 fn upstream_error_code(url: &str, status: u64, body: &str) -> &'static str {
@@ -695,11 +769,28 @@ fn dispatch(
             qishui::playlist(payload)
         }
         ("provider.catalog", "catalog.discover") if platform == "qishui" => qishui::discover(),
+        ("provider.catalog", "catalog.home") if platform == "spotify" => {
+            spotify_web::home(platform_id(payload))
+        }
+        ("provider.catalog", "catalog.discover") if platform == "spotify" => {
+            spotify_web::discover(platform_id(payload))
+        }
+        ("provider.catalog", "catalog.album") if platform == "spotify" => {
+            spotify_web::album(platform_id(payload), payload)
+        }
+        ("provider.catalog", "catalog.artist") if platform == "spotify" => {
+            spotify_artist(payload, |url| request("GET", url, None, None, None, None))
+        }
+        ("provider.catalog", "catalog.playlist") if platform == "spotify" => {
+            spotify_web::playlist(platform_id(payload), &track_id(payload), payload)
+        }
         ("provider.lyrics", "lyrics.get") if platform == "qishui" => qishui::lyrics(payload),
         ("provider.catalog", "catalog.status") => provider_status(platform, payload),
         ("provider.catalog", "catalog.search") => search(platform, payload),
         ("provider.catalog", "catalog.song") => song_detail(platform, payload),
-        ("provider.catalog", "catalog.artwork-data-uri") => artwork_data_uri(platform, payload),
+        ("provider.catalog", "catalog.artwork-data-uri") => {
+            artwork_data_uri(platform, payload, yaqmc::provider::network::request)
+        }
         ("provider.lyrics", "lyrics.get") => lyrics(platform, payload),
         ("provider.comments", "comments.list") if platform == "netease" => {
             netease_comments::comments_page(payload)
@@ -751,7 +842,14 @@ fn artwork_request_url(platform: &str, url: &str) -> Option<String> {
     let allowed = match platform {
         "netease" => host.ends_with(".music.126.net") && !host.contains(['@', ':']),
         "kugou" => ["imge.kugou.com", "singerimg.kugou.com", "c1.kgimg.com"].contains(&host),
-        "spotify" => host == "i.scdn.co",
+        "spotify" => [
+            "i.scdn.co",
+            "charts-images.scdn.co",
+            "mosaic.scdn.co",
+            "image-cdn-fa.spotifycdn.com",
+            "image-cdn-ak.spotifycdn.com",
+        ]
+        .contains(&host),
         "qishui" => qishui::IMAGE_HOSTS.contains(&host),
         _ => false,
     };
@@ -765,15 +863,31 @@ fn artwork_request_url(platform: &str, url: &str) -> Option<String> {
     })
 }
 
-fn artwork_data_uri(platform: &str, payload: &Value) -> Result<String, String> {
+fn artwork_data_uri(
+    platform: &str,
+    payload: &Value,
+    fetch: impl Fn(&str) -> Result<String, String>,
+) -> Result<String, String> {
     let url = payload
         .get("url")
         .and_then(Value::as_str)
         .and_then(|url| artwork_request_url(platform, url))
         .ok_or_else(|| error("invalid-request", "artwork origin is not supported", false))?;
-    let request = json!({"method": "GET", "url": url, "responseFormat": "image"});
-    let raw = yaqmc::provider::network::request(&request.to_string())
-        .map_err(|_| error("offline", "artwork request failed", true))?;
+    let request = json!({"method": "GET", "url": url, "responseFormat": "image"}).to_string();
+    let raw = match fetch(&request) {
+        Err(reason)
+            if platform == "spotify"
+                && matches!(
+                    reason.as_str(),
+                    "plugin network connection failed"
+                        | "plugin network host could not be resolved"
+                ) =>
+        {
+            fetch(&request)
+        }
+        result => result,
+    }
+    .map_err(|reason| network_request_error(&reason))?;
     let response: NetworkResponse<Value> = serde_json::from_str(&raw)
         .map_err(|_| error("malformed-response", "artwork response is invalid", false))?;
     if !(200..300).contains(&response.status) || !response.body.starts_with("data:image/") {
@@ -819,17 +933,23 @@ fn login_methods(platform: &str) -> Result<String, String> {
     })
 }
 
-/// PKCE needs the user's Client ID; without one there is nothing to offer, so
-/// report the missing configuration instead of an unusable login button.
+/// A configured Client ID uses official OAuth. Without one, Spotify's web
+/// account session is available through the host's isolated browser cookie
+/// import and keeps catalog access on the same web-player transport.
 fn spotify_login_methods(transport: SpotifyTransport) -> Result<String, String> {
-    spotify_oauth(transport, |_| {
-        Ok(json!([{
+    Ok(match transport {
+        SpotifyTransport::WebApi(_) => json!([{
             "id": "browser-oauth",
             "label": "Spotify browser login (PKCE)",
             "flow": "oauth"
-        }])
-        .to_string())
-    })
+        }]),
+        SpotifyTransport::WebPlayer => json!([{
+            "id": "browser-web",
+            "label": "Spotify Web Account",
+            "flow": "oauth"
+        }]),
+    }
+    .to_string())
 }
 
 fn state_key(platform: &str, profile: &str, name: &str) -> String {
@@ -881,9 +1001,9 @@ fn status_value(platform: &str, profile: &str, quality: &str) -> Value {
         "preferredQuality": quality,
         "capabilities": {
             "search": true,
-            "album": !matches!(platform, "spotify" | "qishui"),
-            "artist": !matches!(platform, "spotify" | "qishui"),
-            "playlist": platform != "spotify",
+            "album": platform != "qishui",
+            "artist": platform != "qishui",
+            "playlist": true,
             "lyrics": platform != "spotify",
             "wordTimedLyrics": matches!(platform, "kugou" | "qishui"),
             "streaming": true,
@@ -1167,30 +1287,20 @@ struct KugouSearchPage {
 }
 
 fn search(platform: &str, payload: &Value) -> Result<String, String> {
-    if platform == "netease"
-        && payload
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("song")
-            != "song"
-    {
-        return netease_catalog::search(payload);
-    }
-    if platform == "kugou"
-        && payload
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("song")
-            != "song"
-    {
-        return kugou_catalog::search(payload);
-    }
-    if payload
+    let kind = payload
         .get("kind")
         .and_then(Value::as_str)
-        .unwrap_or("song")
-        != "song"
-    {
+        .unwrap_or("song");
+    if platform == "netease" && kind != "song" {
+        return netease_catalog::search(payload);
+    }
+    if platform == "kugou" && kind != "song" {
+        return kugou_catalog::search(payload);
+    }
+    if platform == "spotify" && kind == "playlist" {
+        return spotify_playlist_search(payload);
+    }
+    if kind != "song" {
         return Err(unsupported("catalog.search kind"));
     }
     let query = payload
@@ -1220,12 +1330,160 @@ fn search(platform: &str, payload: &Value) -> Result<String, String> {
     Ok(response.to_string())
 }
 
+fn spotify_artist(
+    payload: &Value,
+    fetch: impl FnOnce(&str) -> Result<Value, String>,
+) -> Result<String, String> {
+    let id = track_id(payload);
+    if id.len() != 22 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(error(
+            "invalid-request",
+            "Spotify artist ID is invalid",
+            false,
+        ));
+    }
+    // The public oEmbed endpoint provides the artist name and image without an account.
+    let url = query_url(
+        SPOTIFY_OPEN,
+        "/oembed",
+        &[("url", format!("{SPOTIFY_OPEN}/artist/{id}"))],
+    );
+    let response = fetch(&url)?;
+    let name = response["title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            error(
+                "malformed-response",
+                "Spotify artist name is missing",
+                false,
+            )
+        })?;
+    let image = response["thumbnail_url"]
+        .as_str()
+        .and_then(|url| artwork_request_url("spotify", url))
+        .unwrap_or_default();
+    Ok(json!({
+        "id": id,
+        "name": name,
+        "artwork": {"src": image, "alt": name, "dominantColor": "#334155", "variants": []},
+        "description": "",
+        "topSongs": [],
+        "albums": [],
+    })
+    .to_string())
+}
+
+fn spotify_playlist_search(payload: &Value) -> Result<String, String> {
+    let query = payload
+        .get("query")
+        .or_else(|| payload.get("keyword"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if query.trim().is_empty() {
+        return Err(error("invalid-request", "search query is empty", false));
+    }
+    let profile = platform_id(payload);
+    let page = page_number(payload);
+    let limit = limit(payload);
+    let (items, has_more) = if spotify_transport() == SpotifyTransport::WebPlayer {
+        spotify_web::search_playlists(profile, query, page, limit)?
+    } else {
+        spotify_official_search_playlists(profile, query, page, limit)?
+    };
+    let mut response = json!({
+        "kind": "playlist",
+        "query": query,
+        "page": page,
+        "hasMore": has_more
+    });
+    response["items"] = Value::Array(items);
+    Ok(response.to_string())
+}
+
+fn spotify_official_search_playlists(
+    profile: &str,
+    query: &str,
+    page: u64,
+    limit: u64,
+) -> Result<(Vec<Value>, bool), String> {
+    let auth = spotify_access(profile)?;
+    let offset = page.saturating_sub(1).saturating_mul(limit);
+    let url = query_url(
+        SPOTIFY_API,
+        "/v1/search",
+        &[
+            ("q", query.to_owned()),
+            ("type", "playlist".to_owned()),
+            ("limit", limit.to_string()),
+            ("offset", offset.to_string()),
+        ],
+    );
+    let response = request_with_meta_headers_as::<Value>(
+        "GET",
+        &url,
+        None,
+        None,
+        Some((auth.0.as_str(), "authorization", "Bearer ")),
+        None,
+        &[],
+    )?
+    .body;
+    let page = response.pointer("/playlists").ok_or_else(|| {
+        error(
+            "malformed-response",
+            "Spotify playlist search page is missing",
+            true,
+        )
+    })?;
+    let raw_items = page.get("items").and_then(Value::as_array).ok_or_else(|| {
+        error(
+            "malformed-response",
+            "Spotify playlist search items are missing",
+            true,
+        )
+    })?;
+    let items = raw_items
+        .iter()
+        .filter_map(spotify_search_playlist_preview)
+        .collect::<Vec<_>>();
+    Ok((items, page.get("next").is_some_and(|next| !next.is_null())))
+}
+
+fn spotify_search_playlist_preview(item: &Value) -> Option<Value> {
+    let id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?;
+    let title = item
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Untitled playlist");
+    Some(json!({
+        "id": id,
+        "title": title,
+        "creator": item
+            .pointer("/owner/display_name")
+            .and_then(Value::as_str)
+            .unwrap_or("Spotify"),
+        "artwork": playlist_artwork(
+            item.pointer("/images/0/url"),
+            title,
+        ),
+        "trackCount": item.pointer("/tracks/total").and_then(Value::as_u64).unwrap_or(0)
+    }))
+}
+
 fn spotify_search(
     profile: &str,
     query: &str,
     page: u64,
     limit: u64,
 ) -> Result<(Vec<Value>, bool), String> {
+    if spotify_transport() == SpotifyTransport::WebPlayer {
+        return spotify_web::search(profile, query, page, limit);
+    }
     let auth = spotify_access(profile)?;
     let offset = page.saturating_sub(1).saturating_mul(limit);
     let url = query_url(
@@ -1746,12 +2004,11 @@ fn spotify_oauth<T>(
 ) -> Result<T, String> {
     match transport {
         SpotifyTransport::WebApi(client_id) => call(&client_id),
-        // The web-player token endpoint answers third-party clients with HTTP
-        // 400 "Unauthorized request" unless they replay a TOTP secret taken
-        // from Spotify's own bundle, which this plugin does not do.
+        // Official OAuth needs a user Client ID. The separate web-account flow
+        // is handled by the browser-session handlers instead.
         SpotifyTransport::WebPlayer => Err(error(
             "provider-not-configured",
-            "Spotify guest catalog is unavailable: Spotify's web-player token endpoint does not permit third-party clients. Set your own Spotify Client ID to use the official Web API.",
+            "Spotify OAuth requires a Client ID; web account login is available without one.",
             false,
         )),
     }
@@ -1875,7 +2132,10 @@ fn prepare_oauth(platform: &str, payload: &Value) -> Result<String, String> {
     if platform != "spotify" {
         return prepare_browser_login(platform, payload);
     }
-    let client_id = spotify_client_id()?;
+    let client_id = match spotify_transport() {
+        SpotifyTransport::WebApi(client_id) => client_id,
+        SpotifyTransport::WebPlayer => return prepare_browser_login(platform, payload),
+    };
     let profile = platform_id(payload);
     let attempt_id = payload
         .get("attemptId")
@@ -1924,6 +2184,9 @@ fn prepare_oauth(platform: &str, payload: &Value) -> Result<String, String> {
 
 fn complete_oauth(platform: &str, payload: &Value) -> Result<String, String> {
     if platform != "spotify" {
+        return complete_browser_login(platform, payload);
+    }
+    if spotify_transport() == SpotifyTransport::WebPlayer {
         return complete_browser_login(platform, payload);
     }
     let profile = platform_id(payload);
@@ -2038,6 +2301,27 @@ fn cancel_oauth(platform: &str, payload: &Value) -> Result<String, String> {
 }
 
 fn browser_login_configuration(platform: &str, method: &str, now: u64) -> Result<Value, String> {
+    if platform == "spotify" {
+        if method != "browser-web" {
+            return Err(unsupported("account.auth.prepare-oauth"));
+        }
+        let source = "https://open.spotify.com/";
+        return Ok(json!({
+            "url": "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F",
+            "navigationAllowlist": [
+                "https://accounts.spotify.com/**",
+                "https://open.spotify.com/**"
+            ],
+            "callbackMatcher": {"urlPrefix": source},
+            "browserSession": {
+                "url": source,
+                "cookieNames": ["sp_dc", "sp_key", "sp_t"],
+                "requiredCookieNames": ["sp_dc"],
+                "credentialOrigins": ["https://open.spotify.com"],
+                "format": "cookie"
+            }
+        }));
+    }
     if !["qq", "wechat"].contains(&method) || !["netease", "kugou"].contains(&platform) {
         return Err(unsupported("account.auth.prepare-oauth"));
     }
@@ -2132,6 +2416,7 @@ fn complete_browser_login(platform: &str, payload: &Value) -> Result<String, Str
         ));
     }
     let origins: &[(&str, &str)] = match platform {
+        "spotify" => &[("https://open.spotify.com", "web-cookie")],
         "netease" => &[(NETEASE_API, "cookie")],
         "kugou" => &[
             (KUGOU_API, "cookie-api"),
@@ -2141,6 +2426,9 @@ fn complete_browser_login(platform: &str, payload: &Value) -> Result<String, Str
         _ => return Err(unsupported("account.auth.complete-oauth")),
     };
     let credentials = browser_credential_handles(payload, origins)?;
+    if platform == "spotify" {
+        return complete_spotify_web_login(profile, &key, credentials);
+    }
     let handle = &credentials[0].1;
     let response = if platform == "netease" {
         let path = "/api/w/nuser/account/get";
@@ -2206,6 +2494,128 @@ fn complete_browser_login(platform: &str, payload: &Value) -> Result<String, Str
     } else {
         authenticated_snapshot(platform, profile, display_name)
     }
+}
+
+fn complete_spotify_web_login(
+    profile: &str,
+    attempt_key: &str,
+    credentials: Vec<(String, String)>,
+) -> Result<String, String> {
+    let (_, cookie_handle) = credentials.into_iter().next().ok_or_else(|| {
+        error(
+            "invalid-request",
+            "browser credentials are incomplete",
+            false,
+        )
+    })?;
+    let session = match spotify_web::authenticate_with_cookie(profile, &cookie_handle) {
+        Ok(session) => session,
+        Err(reason) => {
+            let _ = yaqmc::provider::credentials::delete(&cookie_handle);
+            return Err(reason);
+        }
+    };
+    let cookie_key = credential_key("spotify-web", profile, "web-cookie");
+    let access_key = credential_key("spotify-web", profile, "access-token");
+    let preview_key = credential_key("spotify-web", profile, "preview-access-token");
+    let client_token_key = credential_key("spotify-web", profile, "client-token");
+    let media_access_key = credential_key("spotify-web", profile, "media-access-token");
+    let media_client_token_key = credential_key("spotify-web", profile, "media-client-token");
+    let license_access_key = credential_key("spotify-web", profile, "license-access-token");
+    let license_client_token_key = credential_key("spotify-web", profile, "license-client-token");
+    let expiry_key = credential_key("spotify-web", profile, "access-expires");
+    let client_token_expiry_key = credential_key("spotify-web", profile, "client-token-expires");
+    let user_key = credential_key("spotify-web", profile, "user-id");
+    let previous_cookie = credential_handle(&cookie_key)?;
+    let previous_access = credential_handle(&access_key)?;
+    let previous_preview = credential_handle(&preview_key)?;
+    let previous_client_token = credential_handle(&client_token_key)?;
+    let previous_media_access = credential_handle(&media_access_key)?;
+    let previous_media_client_token = credential_handle(&media_client_token_key)?;
+    let previous_license_access = credential_handle(&license_access_key)?;
+    let previous_license_client_token = credential_handle(&license_client_token_key)?;
+    let previous_expiry = storage_get(&expiry_key)?;
+    let previous_client_token_expiry = storage_get(&client_token_expiry_key)?;
+    let previous_user = storage_get(&user_key)?;
+    let installed = (|| -> Result<(), String> {
+        storage_set(&cookie_key, &cookie_handle)?;
+        storage_set(&access_key, &session.access_handle)?;
+        storage_set(&preview_key, &session.preview_access_handle)?;
+        storage_set(&client_token_key, &session.client_token_handle)?;
+        storage_set(&media_access_key, &session.media_access_handle)?;
+        storage_set(&media_client_token_key, &session.media_client_token_handle)?;
+        storage_set(&license_access_key, &session.license_access_handle)?;
+        storage_set(
+            &license_client_token_key,
+            &session.license_client_token_handle,
+        )?;
+        storage_set(&expiry_key, &session.expires_ms.to_string())?;
+        storage_set(
+            &client_token_expiry_key,
+            &session.client_token_expires_ms.to_string(),
+        )?;
+        storage_set(&user_key, &session.profile.username)?;
+        storage_delete(attempt_key)
+    })();
+    if let Err(reason) = installed {
+        let _ = yaqmc::provider::credentials::delete(&cookie_handle);
+        let _ = yaqmc::provider::credentials::delete(&session.access_handle);
+        let _ = yaqmc::provider::credentials::delete(&session.preview_access_handle);
+        let _ = yaqmc::provider::credentials::delete(&session.client_token_handle);
+        let _ = yaqmc::provider::credentials::delete(&session.media_access_handle);
+        let _ = yaqmc::provider::credentials::delete(&session.media_client_token_handle);
+        let _ = yaqmc::provider::credentials::delete(&session.license_access_handle);
+        let _ = yaqmc::provider::credentials::delete(&session.license_client_token_handle);
+        for (key, previous) in [
+            (&cookie_key, &previous_cookie),
+            (&access_key, &previous_access),
+            (&preview_key, &previous_preview),
+            (&client_token_key, &previous_client_token),
+            (&media_access_key, &previous_media_access),
+            (&media_client_token_key, &previous_media_client_token),
+            (&license_access_key, &previous_license_access),
+            (&license_client_token_key, &previous_license_client_token),
+        ] {
+            if let Some(previous) = previous {
+                let _ = storage_set(key, previous);
+            } else {
+                let _ = storage_delete(key);
+            }
+        }
+        if let Some(value) = previous_expiry {
+            let _ = storage_set(&expiry_key, &value);
+        } else {
+            let _ = storage_delete(&expiry_key);
+        }
+        if let Some(value) = previous_client_token_expiry {
+            let _ = storage_set(&client_token_expiry_key, &value);
+        } else {
+            let _ = storage_delete(&client_token_expiry_key);
+        }
+        if let Some(value) = previous_user {
+            let _ = storage_set(&user_key, &value);
+        } else {
+            let _ = storage_delete(&user_key);
+        }
+        return Err(reason);
+    }
+    for previous in [
+        previous_cookie,
+        previous_access,
+        previous_preview,
+        previous_client_token,
+        previous_media_access,
+        previous_media_client_token,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let _ = yaqmc::provider::credentials::delete(&previous);
+    }
+    let mut snapshot =
+        authenticated_snapshot_value("spotify", profile, Some(session.profile.nickname), now_ms());
+    snapshot["profile"]["avatarUrl"] = json!(session.profile.avatar_url);
+    Ok(snapshot.to_string())
 }
 
 fn browser_credential_handles(
@@ -2702,11 +3112,13 @@ fn snapshot(platform: &str, payload: &Value) -> Result<String, String> {
     }
     let result = match platform {
         "spotify" => {
-            // Guest mode keeps any stored OAuth session but does not expose it.
-            if spotify_transport() != SpotifyTransport::WebPlayer
-                && credential_handle(&credential_key(platform, &profile, "refresh-token"))?
-                    .is_some()
-            {
+            let credential_kind = match spotify_transport() {
+                SpotifyTransport::WebApi(_) => credential_key(platform, &profile, "refresh-token"),
+                SpotifyTransport::WebPlayer => {
+                    credential_key("spotify-web", &profile, "web-cookie")
+                }
+            };
+            if credential_handle(&credential_kind)?.is_some() {
                 spotify_account_snapshot(&profile)
             } else {
                 guest_snapshot(platform, &profile, "guest", None)
@@ -2753,20 +3165,31 @@ fn session_snapshot_result(
 }
 
 fn spotify_account_snapshot(profile: &str) -> Result<String, String> {
-    let access = spotify_access(profile)?;
-    let response = request(
-        "GET",
-        &format!("{SPOTIFY_API}/v1/me"),
-        None,
-        None,
-        Some((access.0.as_str(), "authorization", "Bearer ")),
-        None,
-    )?;
-    authenticated_snapshot(
-        "spotify",
-        profile,
-        account_display_name("spotify", &response)?,
-    )
+    match spotify_transport() {
+        SpotifyTransport::WebApi(_) => {
+            let access = spotify_access(profile)?;
+            let response = request(
+                "GET",
+                &format!("{SPOTIFY_API}/v1/me"),
+                None,
+                None,
+                Some((access.0.as_str(), "authorization", "Bearer ")),
+                None,
+            )?;
+            authenticated_snapshot(
+                "spotify",
+                profile,
+                account_display_name("spotify", &response)?,
+            )
+        }
+        SpotifyTransport::WebPlayer => {
+            let account = spotify_web::account(profile)?;
+            let mut snapshot =
+                authenticated_snapshot_value("spotify", profile, Some(account.nickname), now_ms());
+            snapshot["profile"]["avatarUrl"] = json!(account.avatar_url);
+            Ok(snapshot.to_string())
+        }
+    }
 }
 
 fn netease_account_snapshot(profile: &str) -> Result<String, String> {
@@ -2897,6 +3320,13 @@ fn sign_out(platform: &str, payload: &Value) -> Result<String, String> {
     ] {
         clear_credential(&credential_key(platform, profile, kind))?;
     }
+    if platform == "spotify" {
+        for kind in ["web-cookie", "access-token", "preview-access-token"] {
+            clear_credential(&credential_key("spotify-web", profile, kind))?;
+        }
+        storage_delete(&credential_key("spotify-web", profile, "access-expires"))?;
+        storage_delete(&credential_key("spotify-web", profile, "user-id"))?;
+    }
     storage_delete(&state_key(platform, profile, "access-expires"))?;
     storage_delete(&state_key(platform, profile, "oauth-attempt"))?;
     storage_delete(&state_key(platform, profile, "qr-attempt"))?;
@@ -2904,13 +3334,16 @@ fn sign_out(platform: &str, payload: &Value) -> Result<String, String> {
 }
 
 fn account_profile_is_authenticated(platform: &str, profile: &str) -> Result<(), String> {
-    let credential_kind = match platform {
-        "spotify" => "refresh-token",
-        "netease" => "cookie",
-        "kugou" => "cookie-api",
+    let credential_key = match platform {
+        "spotify" => match spotify_transport() {
+            SpotifyTransport::WebApi(_) => credential_key(platform, profile, "refresh-token"),
+            SpotifyTransport::WebPlayer => credential_key("spotify-web", profile, "web-cookie"),
+        },
+        "netease" => credential_key(platform, profile, "cookie"),
+        "kugou" => credential_key(platform, profile, "cookie-api"),
         _ => return Err(unsupported("account")),
     };
-    if credential_handle(&credential_key(platform, profile, credential_kind))?.is_none() {
+    if credential_handle(&credential_key)?.is_none() {
         return Err(error(
             "authentication-expired",
             "account login is required",
@@ -3189,6 +3622,9 @@ fn kugou_playlist_summary(item: &Value, profile: &str) -> Option<Value> {
 }
 
 fn spotify_me_id(profile: &str) -> Result<String, String> {
+    if spotify_transport() == SpotifyTransport::WebPlayer {
+        return Ok(spotify_web::account(profile)?.username);
+    }
     let access = spotify_access(profile)?;
     let response = request(
         "GET",
@@ -3229,6 +3665,9 @@ fn netease_account_id(profile: &str) -> Result<String, String> {
 }
 
 fn spotify_favorite_songs(profile: &str, payload: &Value) -> Result<String, String> {
+    if spotify_transport() == SpotifyTransport::WebPlayer {
+        return spotify_web::favorite_songs(profile, payload);
+    }
     let offset = account_cursor(payload)?;
     let page_limit = limit(payload);
     let access = spotify_access(profile)?;
@@ -3334,6 +3773,9 @@ fn favorite_songs(platform: &str, payload: &Value) -> Result<String, String> {
 }
 
 fn spotify_playlists(profile: &str, payload: &Value) -> Result<String, String> {
+    if spotify_transport() == SpotifyTransport::WebPlayer {
+        return spotify_web::account_playlists(profile, payload);
+    }
     let offset = account_cursor(payload)?;
     let page_limit = limit(payload);
     let owner_id = spotify_me_id(profile)?;
@@ -3547,6 +3989,35 @@ fn spotify_playlist_tracks(
     id: &str,
     payload: &Value,
 ) -> Result<String, String> {
+    if spotify_transport() == SpotifyTransport::WebPlayer {
+        let raw = spotify_web::playlist(profile, id, payload)?;
+        let page: Value = serde_json::from_str(&raw).map_err(|_| {
+            error(
+                "malformed-response",
+                "Spotify playlist page is invalid",
+                false,
+            )
+        })?;
+        let tracks = page.get("tracks").cloned().ok_or_else(|| {
+            error(
+                "malformed-response",
+                "Spotify playlist tracks are missing",
+                true,
+            )
+        })?;
+        let next = page.get("nextCursor").cloned().unwrap_or(Value::Null);
+        let total = page.get("trackCount").and_then(Value::as_u64);
+        return Ok(json!({
+            "summary": playlist,
+            "tracks": account_page_value(
+                tracks.as_array().cloned().unwrap_or_default(),
+                next.as_str().map(ToOwned::to_owned),
+                total,
+                now_ms()
+            )
+        })
+        .to_string());
+    }
     let offset = account_cursor(payload)?;
     let page_limit = limit(payload);
     let access = spotify_access(profile)?;
@@ -3729,6 +4200,9 @@ fn song_detail(platform: &str, payload: &Value) -> Result<String, String> {
     let profile = platform_id(payload);
     let item = match platform {
         "spotify" => {
+            if spotify_transport() == SpotifyTransport::WebPlayer {
+                return spotify_web::song(profile, &id).map(|song| song.to_string());
+            }
             let access = spotify_access(profile)?;
             request(
                 "GET",
@@ -3877,6 +4351,9 @@ fn playback(platform: &str, payload: &Value) -> Result<String, String> {
     }
     let (url, length, mime, preview, resolved, rights_fallback) = match platform {
         "spotify" => {
+            if spotify_transport() == SpotifyTransport::WebPlayer {
+                return spotify_web::playback(profile, &id, &quality);
+            }
             let access = spotify_access(profile)?;
             let response = request(
                 "GET",
@@ -4898,6 +5375,22 @@ mod tests {
                 }));
             }
         }
+        let spotify = browser_login_configuration("spotify", "browser-web", 0).unwrap();
+        assert_eq!(
+            spotify["browserSession"],
+            json!({
+                "url": "https://open.spotify.com/",
+                "cookieNames": ["sp_dc", "sp_key", "sp_t"],
+                "requiredCookieNames": ["sp_dc"],
+                "credentialOrigins": ["https://open.spotify.com"],
+                "format": "cookie"
+            })
+        );
+        assert!(spotify["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://accounts.spotify.com/login?"));
+        assert!(browser_login_configuration("spotify", "clicked-cookie", 0).is_err());
         assert!(browser_login_configuration("spotify", "qq", 0).is_err());
         assert!(browser_login_configuration("kugou", "unknown", 0).is_err());
     }
@@ -5012,21 +5505,73 @@ mod tests {
         ] {
             assert_eq!(status["capabilities"][field], true, "{field}");
         }
-        assert_eq!(
-            status_value("spotify", "work", "standard")["capabilities"]["album"],
-            false
-        );
+        let spotify = status_value("spotify", "work", "standard");
+        assert_eq!(spotify["capabilities"]["album"], true);
+        assert_eq!(spotify["capabilities"]["artist"], true);
+        assert_eq!(spotify["capabilities"]["playlist"], true);
     }
 
     #[test]
     fn unsupported_operations_do_not_report_false_success() {
         for platform in ["spotify"] {
-            for kind in ["artist", "album", "playlist"] {
+            for kind in ["artist", "album"] {
                 let result = search(platform, &json!({"kind": kind, "query": "sample"}));
                 let failure: Value = serde_json::from_str(&result.unwrap_err()).unwrap();
                 assert_eq!(failure["code"], "unsupported-operation");
             }
         }
+    }
+
+    #[test]
+    fn spotify_artist_dispatch_rejects_a_non_artist_id_before_fetching() {
+        let reason = dispatch(
+            "provider.catalog",
+            "catalog.artist",
+            "spotify",
+            &json!({"id": "https://example.invalid/"}),
+        )
+        .unwrap_err();
+        let failure: Value = serde_json::from_str(&reason).unwrap();
+        assert_eq!(failure["code"], "invalid-request");
+    }
+
+    #[test]
+    fn spotify_artist_uses_public_oembed_and_keeps_only_supported_metadata() {
+        let id = "06HL4z0CvFAxyc27GXpf02";
+        let payload = json!({"id": id});
+        let out = spotify_artist(&payload, |url| {
+            assert_eq!(
+                url,
+                "https://open.spotify.com/oembed?url=https%3A%2F%2Fopen.spotify.com%2Fartist%2F06HL4z0CvFAxyc27GXpf02"
+            );
+            Ok(json!({
+                "title": "Fixture artist",
+                "thumbnail_url": "https://image-cdn-fa.spotifycdn.com/image/fixture",
+                "html": "<iframe></iframe>",
+            }))
+        })
+        .unwrap();
+        let artist: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(artist["id"], id);
+        assert_eq!(artist["name"], "Fixture artist");
+        assert_eq!(
+            artist["artwork"]["src"],
+            "https://image-cdn-fa.spotifycdn.com/image/fixture"
+        );
+        assert_eq!(artist["topSongs"], json!([]));
+        assert_eq!(artist["albums"], json!([]));
+        assert!(artist.get("html").is_none());
+
+        let out = spotify_artist(&payload, |_| {
+            Ok(json!({
+                "title": "Fixture artist",
+                "thumbnail_url": "https://image-cdn-fa.spotifycdn.com.example.invalid/image/fixture",
+            }))
+        })
+        .unwrap();
+        let artist: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(artist["artwork"]["src"], "");
+        assert!(spotify_artist(&payload, |_| Ok(json!({"title": " "}))).is_err());
     }
 
     #[test]
@@ -5060,6 +5605,24 @@ mod tests {
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(png[24], 1);
         assert_eq!(png[25], 0);
+    }
+
+    #[test]
+    fn spotify_playlist_search_preview_keeps_identity_creator_cover_and_count() {
+        let preview = spotify_search_playlist_preview(&json!({
+            "id": "playlist123",
+            "name": "Daily Mix",
+            "owner": {"display_name": "Spotify"},
+            "images": [{"url": "https://mosaic.scdn.co/cover", "width": 640, "height": 640}],
+            "tracks": {"total": 42}
+        }))
+        .unwrap();
+        assert_eq!(preview["id"], "playlist123");
+        assert_eq!(preview["title"], "Daily Mix");
+        assert_eq!(preview["creator"], "Spotify");
+        assert_eq!(preview["artwork"]["src"], "https://mosaic.scdn.co/cover");
+        assert_eq!(preview["trackCount"], 42);
+        assert!(spotify_search_playlist_preview(&json!({"name": "missing id"})).is_none());
     }
 
     #[test]
@@ -5341,12 +5904,75 @@ mod tests {
     }
 
     #[test]
+    fn spotify_artwork_retries_one_connection_failure_but_preserves_permission_errors() {
+        use core::cell::Cell;
+
+        let payload = json!({"url":"https://charts-images.scdn.co/assets/cover.jpg"});
+        let attempts = Cell::new(0);
+        let image = artwork_data_uri("spotify", &payload, |_| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err("plugin network connection failed".into())
+            } else {
+                Ok(json!({"status":200,"body":"data:image/jpeg;base64,/9j/"}).to_string())
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(
+            serde_json::from_str::<String>(&image).unwrap(),
+            "data:image/jpeg;base64,/9j/"
+        );
+        for (reason, count, code) in [
+            ("plugin network host could not be resolved", 2, "offline"),
+            (
+                "plugin network origin is not granted",
+                1,
+                "authorization-rejected",
+            ),
+            ("plugin network request timed out", 1, "timeout"),
+        ] {
+            attempts.set(0);
+            let failure = artwork_data_uri("spotify", &payload, |_| {
+                attempts.set(attempts.get() + 1);
+                Err(reason.into())
+            })
+            .unwrap_err();
+            let failure: Value = serde_json::from_str(&failure).unwrap();
+            assert_eq!(failure["code"], code);
+            assert_eq!(attempts.get(), count);
+        }
+    }
+
+    #[test]
     fn artwork_requests_use_only_platform_image_origins_and_bounded_thumbnails() {
         assert_eq!(
             artwork_request_url("netease", "https://p2.music.126.net/cover.jpg"),
             Some("https://p2.music.126.net/cover.jpg?param=300y300".to_owned())
         );
         assert!(artwork_request_url("spotify", "https://i.scdn.co/image/cover").is_some());
+        assert!(
+            artwork_request_url("spotify", "https://charts-images.scdn.co/regional/global")
+                .is_some()
+        );
+        assert!(
+            artwork_request_url("spotify", "https://charts-images.scdn.co.example.org/image")
+                .is_none()
+        );
+        assert!(artwork_request_url("spotify", "https://mosaic.scdn.co/cover").is_some());
+        assert!(
+            artwork_request_url("spotify", "https://image-cdn-fa.spotifycdn.com/image/cover")
+                .is_some()
+        );
+        assert!(
+            artwork_request_url("spotify", "https://image-cdn-ak.spotifycdn.com/image/cover")
+                .is_some()
+        );
+        assert!(artwork_request_url(
+            "spotify",
+            "https://image-cdn-fa.spotifycdn.com.evil.example/image/cover"
+        )
+        .is_none());
         assert!(artwork_request_url("kugou", "https://imge.kugou.com/cover.jpg").is_some());
         for (platform, url) in [
             ("netease", "http://p2.music.126.net/cover.jpg"),
@@ -5608,16 +6234,19 @@ mod tests {
         assert!(guest["message"]
             .as_str()
             .unwrap()
-            .starts_with("Spotify guest catalog"));
+            .starts_with("Spotify OAuth"));
     }
 
     #[test]
-    fn spotify_offers_pkce_login_only_with_a_configured_client_id() {
+    fn spotify_offers_web_account_login_without_a_client_id_and_pkce_with_one() {
         let guest: Value = serde_json::from_str(
-            &spotify_login_methods(spotify_transport_for(Some("  ".to_owned()))).unwrap_err(),
+            &spotify_login_methods(spotify_transport_for(Some("  ".to_owned()))).unwrap(),
         )
         .unwrap();
-        assert_eq!(guest["code"], "provider-not-configured");
+        assert_eq!(
+            guest,
+            json!([{"id": "browser-web", "label": "Spotify Web Account", "flow": "oauth"}])
+        );
         let configured: Value = serde_json::from_str(
             &spotify_login_methods(spotify_transport_for(Some("client-id".to_owned()))).unwrap(),
         )
@@ -5626,6 +6255,46 @@ mod tests {
             configured,
             json!([{"id": "browser-oauth", "label": "Spotify browser login (PKCE)", "flow": "oauth"}])
         );
+    }
+
+    #[test]
+    fn network_policy_rejections_are_not_reported_as_offline() {
+        for (reason, code, retryable) in [
+            (
+                "plugin network header referer is not allowed",
+                "client-unsupported",
+                false,
+            ),
+            (
+                "plugin network header app-platform is not allowed",
+                "client-unsupported",
+                false,
+            ),
+            (
+                "plugin network origin is not granted",
+                "authorization-rejected",
+                false,
+            ),
+            ("plugin network request timed out", "timeout", true),
+            ("plugin network connection failed", "offline", true),
+            ("plugin network host could not be resolved", "offline", true),
+            ("plugin network request failed", "offline", true),
+            (
+                "component credential header is not allowed",
+                "provider-failure",
+                false,
+            ),
+            (
+                "private diagnostic with secret material",
+                "provider-failure",
+                false,
+            ),
+        ] {
+            let failure: Value = serde_json::from_str(&network_request_error(reason)).unwrap();
+            assert_eq!(failure["code"], code, "{reason}");
+            assert_eq!(failure["retryable"], retryable, "{reason}");
+            assert!(!failure["message"].as_str().unwrap().contains(reason));
+        }
     }
 
     #[test]

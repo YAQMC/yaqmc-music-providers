@@ -1,6 +1,6 @@
 [package]
 name = "yaqmc-provider-music"
-version = "0.1.0"
+version = "0.1.1-beta.1"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -14,12 +14,14 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 cbc = { version = "0.1", default-features = false, features = ["alloc", "block-padding"] }
 dlmalloc = { version = "0.2", default-features = false, features = ["global"] }
 ecb = { version = "0.1", default-features = false, features = ["alloc", "block-padding"] }
+hmac = { version = "0.12", default-features = false }
 md-5 = { version = "0.10", default-features = false }
 miniz_oxide = { version = "0.8.9", default-features = false, features = ["with-alloc"] }
 num-bigint = { version = "0.4", default-features = false }
 qrcodegen = { version = "1.8", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 wit-bindgen = { version = "0.46", default-features = false, features = ["macros", "realloc"] }
 

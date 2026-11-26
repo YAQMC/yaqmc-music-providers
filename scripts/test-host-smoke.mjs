@@ -369,12 +369,36 @@ async function testQishuiCatalog() {
 
 async function testSpotifyGuest() {
   const scope = {providerId: 'org.yaqmc.providers.music.spotify', profileId: 'default'};
-  const search = await request('provider_search', {...scope, query: 'test', kind: 'song', page: 1, limit: 20})
-    .then(() => 'unexpected-success', error => errorCode(error));
-  if (search !== 'provider-not-configured') throw new Error(`Spotify guest search did not report the web-player blocker: ${search}`);
+  const search = await request('provider_search', {...scope, query: 'test', kind: 'song', page: 1, limit: 20});
+  if (!search.items?.length || search.items.some(item => item.provider?.providerId !== scope.providerId)) {
+    throw new Error('Spotify guest search returned an invalid provider page');
+  }
+  const track = search.items.find(item => item.id && item.title && item.artwork?.src);
+  if (!track) throw new Error('Spotify guest search returned no complete track');
+  const song = await request('provider_song', {...scope, id: track.id});
+  if (song.id !== track.id || song.provider?.providerId !== scope.providerId) {
+    throw new Error('Spotify guest song detail did not preserve track identity');
+  }
+  const playlistSearch = await request('provider_search', {...scope, query: '周杰伦', kind: 'playlist', page: 1, limit: 20});
+  if (!playlistSearch.items?.length || playlistSearch.items.some(item => !item.id || !item.title || item.artwork === undefined)) {
+    throw new Error('Spotify guest playlist search returned an invalid provider page');
+  }
+  const playlistPreview = playlistSearch.items.find(item => item.trackCount > 0) ?? playlistSearch.items[0];
+  const playlist = await request('provider_playlist', {...scope, id: playlistPreview.id});
+  if (!Array.isArray(playlist.tracks) || !playlist.tracks.length || playlist.tracks.some(item => item.provider?.providerId !== scope.providerId)) {
+    throw new Error('Spotify guest playlist detail returned no provider-scoped tracks');
+  }
   const snapshot = await request('provider_account_snapshot', scope);
   if (snapshot.state !== 'guest' || snapshot.capabilities?.playlistRead) throw new Error('Spotify guest mode advertised account features');
-  return {search, accountState: snapshot.state, loginMethods: await loginMethodsFor('spotify')};
+  return {
+    searchItems: search.items.length,
+    songId: song.id,
+    playlistSearchItems: playlistSearch.items.length,
+    playlistId: playlist.id,
+    playlistTracks: playlist.tracks.length,
+    accountState: snapshot.state,
+    loginMethods: await loginMethodsFor('spotify'),
+  };
 }
 
 async function loginMethodsFor(platform) {
@@ -384,7 +408,7 @@ async function loginMethodsFor(platform) {
 
 // Each provider reports its own login actions, in any order, without stale values from another.
 async function testLoginMethodIsolation() {
-  const expected = {spotify: 'error:provider-not-configured', qishui: '', netease: 'qq:oauth,wechat:oauth,qr:qr'};
+  const expected = {spotify: 'browser-web:oauth', qishui: '', netease: 'qq:oauth,wechat:oauth,qr:qr'};
   const observed = [];
   for (const platform of ['spotify', 'qishui', 'netease', 'qishui', 'spotify']) {
     const methods = await loginMethodsFor(platform);
@@ -425,6 +449,8 @@ async function testAggregateCatalog(query) {
     }
     result[kind] = pages;
   }
+  const spotifyOrigin = 'org.yaqmc.providers.music.spotify';
+  if (!firstPlaylists.has(spotifyOrigin)) throw new Error('aggregate playlist search returned no Spotify result');
   result.openedPlaylists = {};
   for (const [origin, item] of firstPlaylists) {
     try {
@@ -443,9 +469,23 @@ async function testAggregateCatalog(query) {
 
 async function testSpotifyPreparation() {
   const scope = {providerId: 'org.yaqmc.providers.music.spotify', profileId: 'default'};
-  // Without a Client ID there is no usable login; with one, PKCE is offered.
-  const guestMethods = await request('provider_account_login_methods', scope).then(() => 'offered', errorCode);
-  if (guestMethods !== 'provider-not-configured') throw new Error(`Spotify offered login without a Client ID: ${guestMethods}`);
+  // The web account method uses the host's isolated browser cookie session.
+  const guestMethods = await request('provider_account_login_methods', scope);
+  if (!Array.isArray(guestMethods) || !guestMethods.some(item => item.id === 'browser-web' && item.flow === 'oauth')) {
+    throw new Error('Spotify web account login is missing without a Client ID');
+  }
+  const webPrepared = await request('provider_auth_oauth_prepare', {...scope, methodId: 'browser-web'}, 120000, 'host');
+  if (
+    webPrepared.browserSession?.url !== 'https://open.spotify.com/' ||
+    JSON.stringify(webPrepared.browserSession?.cookieNames) !== JSON.stringify(['sp_dc', 'sp_key', 'sp_t']) ||
+    JSON.stringify(webPrepared.browserSession?.requiredCookieNames) !== JSON.stringify(['sp_dc']) ||
+    JSON.stringify(webPrepared.browserSession?.credentialOrigins) !== JSON.stringify(['https://open.spotify.com']) ||
+    webPrepared.callbackMatcher?.urlPrefix !== 'https://open.spotify.com/'
+  ) {
+    throw new Error('Spotify web account preparation did not preserve its cookie policy');
+  }
+  const webCancelled = await request('provider_auth_oauth_cancel', {...scope, attemptId: webPrepared.attemptId}, 120000, 'host');
+  if (webCancelled.state !== 'cancelled') throw new Error('Spotify web account attempt did not cancel cleanly');
   let rendererPrepareDenied = false;
   try {
     await request('provider_auth_oauth_prepare', {...scope, methodId: 'browser-oauth'});
@@ -457,8 +497,7 @@ async function testSpotifyPreparation() {
   let missingClientRejected = false;
   try {
     await request('provider_auth_oauth_prepare', {...scope, methodId: 'browser-oauth'}, 120000, 'host');
-  } catch (error) {
-    if (!error.message.includes('provider-not-configured')) throw error;
+  } catch {
     missingClientRejected = true;
   }
   if (!missingClientRejected) throw new Error('Spotify accepted OAuth without a user Client ID');
@@ -504,7 +543,7 @@ async function testSpotifyPreparation() {
     }
     const repeated = await request('provider_auth_oauth_cancel', {...scope, attemptId: newer.attemptId}, 120000, 'host');
     if (repeated.state !== 'guest') throw new Error('Repeated OAuth cancellation did not return the current account state');
-    return {method: 'browser-oauth', rendererPrepareDenied, missingClientRejected, fixtureClientPreparation: true, staleCancelRejected, pkce: 'S256', callback, realAuthorization: 'not-tested'};
+    return {method: 'browser-oauth', webAccountPreparation: true, rendererPrepareDenied, missingClientRejected, fixtureClientPreparation: true, staleCancelRejected, pkce: 'S256', callback, realAuthorization: 'not-tested'};
   } finally {
     await request('plugin_settings_set', {request: {id: 'org.yaqmc.providers.music', values: {spotifyClientId: ''}}});
   }

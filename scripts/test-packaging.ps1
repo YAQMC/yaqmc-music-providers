@@ -27,6 +27,8 @@ try {
         @{ Name = 'extra-file'; Mutate = { param($zip) Write-Entry $zip 'unexpected.txt' ([byte[]]@(1)) } },
         @{ Name = 'empty-traversal'; Mutate = { param($zip) Write-Entry $zip '../unexpected.exe' ([byte[]]@()) } },
         @{ Name = 'core-wasm'; Mutate = { param($zip) Write-Entry $zip 'component/provider.wasm' ([byte[]]@(0,97,115,109,1,0,0,0)) } },
+        @{ Name = 'changed-player'; Mutate = { param($zip) Write-Entry $zip 'assets/spotify-player.html' ([Text.Encoding]::UTF8.GetBytes('<audio></audio>')) } },
+        @{ Name = 'missing-player'; Mutate = { param($zip) $zip.GetEntry('assets/spotify-player.html').Delete() } },
         @{ Name = 'missing-song-badges'; Mutate = {
             param($zip)
             $reader = [IO.StreamReader]::new($zip.GetEntry('manifest.json').Open())

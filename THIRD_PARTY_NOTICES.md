@@ -1,6 +1,6 @@
 # Third-party notices
 
-This file records public references used for protocol compatibility. The shipped Rust component is an independent implementation; no Node.js package or upstream runtime is included in the plugin archive.
+This file records public references used for protocol compatibility and bundled playback assets. The shipped Rust component is an independent implementation. The archive also includes the plugin's browser player and hls.js; it contains no Node.js package or native browser/CDM runtime.
 
 | Project | Revision / access date | License | Use |
 | --- | --- | --- | --- |
@@ -15,8 +15,10 @@ This file records public references used for protocol compatibility. The shipped
 | [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) | `62730f900dc9fdc51396a663b3d33a6c4c704046` | MIT | KuGou artist/album/playlist search and details, recommendations, charts, POST body signing, official preview resources, read-only song comments/replies, and KRC request/XOR/zlib format; sort endpoints also checked against service responses; implementation independently rewritten |
 | [miniz_oxide](https://github.com/Frommi/miniz_oxide) | `0.8.9` | MIT OR Zlib OR Apache-2.0 | Pure Rust, output-bounded zlib decompression for KRC lyrics inside the Wasm component |
 | [guowenye/qishui-api](https://github.com/guowenye/qishui-api) | `e409c10fe7441a10d370da7da61d62bbc1e5126c`; routes rechecked 2026-11-20 | MIT | Qishui Music public discover, playlist-detail, H5 track/lyric, and PC search endpoints and response shapes; implementation independently written in Rust, no source copied. Its PlayAuth/spade decryption is deliberately not used |
-| [margbug01/MySpotify](https://github.com/margbug01/MySpotify) | `f84e2e7537cbf6ea1dcba897d44b7e4d25cbf761` | AGPL-3.0 | Behavioral reference only for Spotify guest browsing; established that its guest token depends on secrets embedded in Spotify's web player, so no guest transport was implemented. No code, assets, or credentials copied |
+| [margbug01/MySpotify](https://github.com/margbug01/MySpotify) | `f84e2e7537cbf6ea1dcba897d44b7e4d25cbf761`; account and catalog operations rechecked 2026-11-21 | AGPL-3.0 | Behavioral and protocol reference for Spotify web-player cookie token exchange, anonymous web-player token, profile/library Pathfinder queries, track/playlist catalog flow, Web Player media manifests, and Widevine license flow; independently implemented in Rust. No Go source, runtime, assets, or persisted account credentials are included |
 | [chthollyphile/folia-major](https://github.com/chthollyphile/folia-major) | `1f2c32a5d91afd1446a9ca8e7d4305ca6f9f22ed` | MIT | KuGou search and mobile song-detail endpoint/response-shape reference; implementation independently rewritten |
+| [YAQMC](https://github.com/YAQMC/YAQMC) | `crates/yaqmc-core/assets/protected_hls_player.html` | GPL-3.0-or-later | Browser player adapted into `plugins/music/assets/spotify-player.html`; corresponding source is that HTML file, distributed directly in the plugin. License included as `assets/player.LICENSE` |
+| [video-dev/hls.js](https://github.com/video-dev/hls.js) | `1.7.4` | Apache-2.0 | Bundled as `assets/hls.min.js`, with upstream notices in `assets/hls.min.js.LICENSE` and license text in `assets/hls.LICENSE-APACHE` |
 
 The repository still contains historical sidecar experiments under `crates/backend`, `crates/platforms`, and `runtime`. They are not copied into the `.yaqmc-plugin` archive and are not required at runtime.
 

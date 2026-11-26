@@ -44,7 +44,7 @@ function New-PluginArchive {
         $false
     )
     try {
-        @('manifest.json', 'component/provider.wasm') |
+        @('manifest.json', 'component/provider.wasm', 'assets/spotify-player.html', 'assets/hls.min.js', 'assets/hls.min.js.LICENSE', 'assets/hls.LICENSE-APACHE', 'assets/player.LICENSE') |
             ForEach-Object {
                 $fullName = [IO.Path]::GetFullPath((Join-Path $Source $_))
                 if (-not $fullName.StartsWith($sourceRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -77,6 +77,10 @@ $componentPath = Join-Path $componentRoot "provider.wasm"
 
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $componentRoot -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $packageRoot 'assets') -Force | Out-Null
+foreach ($asset in @('spotify-player.html', 'hls.min.js', 'hls.min.js.LICENSE', 'hls.LICENSE-APACHE', 'player.LICENSE')) {
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot "plugins/music/assets/$asset") -Destination (Join-Path $packageRoot "assets/$asset")
+}
 
 Invoke-Cargo @(
     "build",
